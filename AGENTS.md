@@ -9,6 +9,7 @@
 ## 目录职责
 
 - `tests/`：Pytest 场景和断言，保持业务可读，不堆底层设备操作。
+- 新增或修改 `tests/` 用例时，遵循项目内 `.agents/skills/pytest-test-writer/SKILL.md` 的测试函数编写约定。
 - `flows/`：完整业务动作和测试流程，可以调用 `devices/`。
 - `devices/`：ADB、Android TV、遥控器、UI、截图和 UIAutomator 等真实设备操作。
 - `ai/`：LLM 客户端、Agent 编排、失败分析、恢复策略和提示词。

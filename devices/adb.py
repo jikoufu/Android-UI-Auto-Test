@@ -93,8 +93,8 @@ class ADBClient:
         """读取当前前台 Activity；无法解析时返回 None。"""
         output = self.run_shell("dumpsys activity activities")
         patterns = (
-            r"mResumedActivity:.*?\s([\w.$]+/[^\s}]+)",
-            r"topResumedActivity=ActivityRecord\{[^ ]+\s([^\s}]+)",
+            r"mResumedActivity:.*?\s(?:u\d+\s+)?([\w.$]+/[\w.$]+)",
+            r"topResumedActivity=ActivityRecord\{[^}]*?\s(?:u\d+\s+)?([\w.$]+/[\w.$]+)",
         )
         for pattern in patterns:
             match = re.search(pattern, output)
