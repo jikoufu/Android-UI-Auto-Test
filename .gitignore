@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Local credentials and environment
+.env
+.env.*
+!.env.example
+
+# Test evidence and generated reports
+reports/*
+!reports/logs/
+!reports/screenshots/
+!reports/ui_dump/
+!reports/.gitkeep
+reports/logs/*
+!reports/logs/.gitkeep
+reports/screenshots/*
+!reports/screenshots/.gitkeep
+reports/ui_dump/*
+!reports/ui_dump/.gitkeep
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

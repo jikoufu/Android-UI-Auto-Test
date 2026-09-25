@@ -1,0 +1,8 @@
+provider: openai-compatible
+base_url: https://api.openai.com/v1
+model: ""
+api_key_env: OPENAI_API_KEY
+temperature: 0.1
+timeout: 30
+max_tool_calls: 5
+max_recovery_steps: 3

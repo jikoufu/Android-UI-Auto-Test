@@ -1,0 +1,4 @@
+adb_path: adb
+serial: ""
+command_timeout: 15
+reports_dir: reports
