@@ -58,7 +58,7 @@ class OpenAICompatibleClient:
         if not api_key:
             raise AIClientError(f"Set the {key_env} environment variable to enable AI calls")
         if not model:
-            raise AIClientError("Set OPENAI_MODEL or configure model in config/ai.yaml")
+            raise AIClientError("Set OPENAI_MODEL or configure a model in config/ai.yaml")
         return cls(
             api_key=api_key,
             model=model,

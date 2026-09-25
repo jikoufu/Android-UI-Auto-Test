@@ -7,6 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from ai.analyzer import AIAnalyzer
+from ai.client import OpenAICompatibleClient
+from ai.context import FailureContextCollector
+from ai.executor import AIExecutor
+from ai.recovery import RecoveryManager
 from devices import ADBClient, AndroidTV, RemoteController, UIDriver
 from utils.config import load_yaml
 
@@ -18,6 +23,49 @@ ROOT = Path(__file__).resolve().parent
 def device_config() -> dict[str, object]:
     """读取项目设备配置。"""
     return load_yaml(ROOT / "config" / "device.yaml")
+
+
+@pytest.fixture(scope="session")
+def ai_config() -> dict[str, object]:
+    """读取非敏感 AI 配置；凭证仍只从环境变量获取。"""
+    return load_yaml(ROOT / "config" / "ai.yaml")
+
+
+@pytest.fixture(scope="session")
+def ai_client() -> OpenAICompatibleClient:
+    """仅在测试请求此 fixture 时初始化 AI 客户端。"""
+    return OpenAICompatibleClient.from_environment(ROOT / "config" / "ai.yaml")
+
+
+@pytest.fixture(scope="session")
+def ai_analyzer(ai_client: OpenAICompatibleClient) -> AIAnalyzer:
+    """创建复用共享 AI 客户端的结构化失败分析器。"""
+    return AIAnalyzer(ai_client, ROOT / "ai" / "prompts" / "error_analysis.md")
+
+
+@pytest.fixture
+def failure_context_collector(tv: AndroidTV, ui: UIDriver) -> FailureContextCollector:
+    """创建复用当前设备 fixture 的失败现场采集器。"""
+    return FailureContextCollector(tv, ui)
+
+
+@pytest.fixture
+def ai_executor(
+    ai_analyzer: AIAnalyzer,
+    failure_context_collector: FailureContextCollector,
+    tv: AndroidTV,
+    ui: UIDriver,
+    ai_config: dict[str, object],
+) -> AIExecutor:
+    """创建复用既有分析器和设备驱动的 Step 执行器。"""
+    return AIExecutor(
+        analyzer=ai_analyzer,
+        context_collector=failure_context_collector,
+        recovery_manager=RecoveryManager(max_steps=int(ai_config.get("max_recovery_steps", 3))),
+        tv=tv,
+        ui=ui,
+        min_recovery_confidence=float(ai_config.get("min_recovery_confidence", 0.75)),
+    )
 
 
 @pytest.fixture(scope="session")

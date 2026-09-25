@@ -9,6 +9,8 @@ class RecoveryAction(StrEnum):
     """AI 可建议执行的恢复动作。"""
     RETRY = "retry"
     BACK = "back"
+    NAVIGATE = "navigate"
+    SCROLL = "scroll"
     REENTER_PAGE = "reenter_page"
     REFIND_ELEMENT = "refind_element"
     RETRY_FLOW = "retry_flow"
@@ -26,3 +28,7 @@ class AIAnalysisResult(BaseModel):
     suggested_action: RecoveryAction
     confidence: float = Field(ge=0, le=1)
     evidence: list[str] = Field(default_factory=list)
+    decision_steps: list[str] = Field(default_factory=list)
+    reason_note: str | None = None
+    target_text: str | None = Field(default=None, min_length=1, max_length=100)
+    scroll_direction: str | None = Field(default=None, pattern="^(up|down)$")

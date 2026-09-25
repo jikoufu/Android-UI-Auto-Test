@@ -176,6 +176,17 @@ class UIDriver:
         """发送 Android 返回键。"""
         self.press("back")
 
+    def scroll(self, direction: str) -> None:
+        """在当前界面纵向滚动一屏。"""
+        if direction not in {"up", "down"}:
+            raise ValueError("direction must be 'up' or 'down'")
+        try:
+            # 手指向上滑动时列表内容向下，反之亦然。
+            gesture = "up" if direction == "down" else "down"
+            self.connect().swipe_ext(gesture, scale=0.7)
+        except Exception as exc:
+            raise UIDriverError(f"Could not scroll Android UI ({type(exc).__name__})") from exc
+
     def home(self) -> None:
         """发送 Android 主屏键。"""
         self.press("home")

@@ -9,6 +9,7 @@
 ## 目录职责
 
 - `tests/`：Pytest 场景和断言，保持业务可读，不堆底层设备操作。
+- `unit_tests/`：不连接真实设备或 AI Provider 的纯单元测试，使用 fake/mock 隔离依赖。
 - 新增或修改 `tests/` 用例时，遵循项目内 `.agents/skills/pytest-test-writer/SKILL.md` 的测试函数编写约定。
 - `flows/`：完整业务动作和测试流程，可以调用 `devices/`。
 - `devices/`：ADB、Android TV、遥控器、UI、截图和 UIAutomator 等真实设备操作。
@@ -64,6 +65,18 @@ AI Agent → ai/tools → flows / devices
 10. 外部进程和网络请求必须有超时，并给出不泄漏凭证的错误信息。
 11. 保持 Python 类型标注，变更后运行相关 Pytest 验证。
 12. 设备相关测试必须标记 `device`，并在文档中说明设备要求；不得把设备缺失描述为测试通过。
+
+## AI Step 恢复规则
+
+- AI 自动恢复必须发生在单个 Step 内；不得在整个 Pytest 测试已经失败后再尝试恢复。
+- 所有自动恢复必须遵循配置的最大步数和最小 confidence threshold，并只执行明确列出的白名单动作。
+- 测试应向 AI 提供目标路径和当前设备证据，不预先指定菜单路径。AI 可在有限步数内返回、纵向滚动或点击；点击目标必须出现在本次失败现场采集到的可见 UI hierarchy 中，每次动作后重新分析，不能猜测或跳过层级。
+- 恢复超过上限、动作重复、置信度不足、AI 请求失败或证据不足时停止自动操作，并抛出清晰错误请求人工介入。
+- 失败现场应尽可能保存当前 Activity、设备状态、UI hierarchy 和截图；截图当前只作为证据保存，不能声称 AI Analyzer 已读取图像内容。
+- `AIExecutor` 的审计日志写入 `reports/logs/ai_recovery.jsonl`，需记录 AI 返回的理由、证据、置信度、当前页面摘要和执行结果；不得记录 API Key 或 Token。
+- 默认设备 Agent Tool Registry 不得注册任意 `adb_shell`。`adb_shell_tool()` 可保留，但不得加入默认工具集。
+- `tests/` 不直接创建或调用 AI Provider；AI 失败分析与 Step 恢复必须通过 `ai/analyzer.py` 和 `ai/executor.py`。
+- `devices/` 不得依赖 AI，也不负责 AI 分析或恢复策略。
 
 ## 验证
 

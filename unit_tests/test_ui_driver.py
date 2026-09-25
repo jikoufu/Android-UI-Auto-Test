@@ -29,6 +29,7 @@ class FakeDevice:
         """初始化用于记录调用的假设备。"""
         self.selectors = []
         self.pressed = []
+        self.swipes = []
 
     def __call__(self, **selector):
         """记录定位条件并返回假元素。"""
@@ -38,6 +39,10 @@ class FakeDevice:
     def press(self, key):
         """记录发送的按键。"""
         self.pressed.append(key)
+
+    def swipe_ext(self, direction, scale=0.7):
+        """记录按方向滚动屏幕。"""
+        self.swipes.append((direction, scale))
 
     def dump_hierarchy(self):
         """返回一段固定的 UI hierarchy XML。"""
@@ -75,9 +80,11 @@ def test_live_ui_actions_use_uiautomator_selectors(tmp_path):
     assert driver.click_text("Network")
     driver.back()
     driver.home()
+    driver.scroll("down")
 
     assert device.selectors == [{"text": "Network"}] * 4
     assert device.pressed == ["back", "home"]
+    assert device.swipes == [("up", 0.7)]
 
 
 def test_dump_and_saved_xml_inspection(tmp_path):

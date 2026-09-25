@@ -20,18 +20,25 @@ class RecoveryManager:
         decide_action: Callable[[int, list[str]], RecoveryAction],
         handlers: Mapping[RecoveryAction, Callable[[], None]],
         verify: Callable[[], bool],
+        action_identity: Callable[[RecoveryAction], str] | None = None,
+        max_steps: int | None = None,
     ) -> RecoveryResult:
         """逐步执行恢复动作，成功、熔断或达到上限时停止。"""
+        step_limit = self.max_steps if max_steps is None else max_steps
+        if step_limit < 1:
+            raise ValueError("max_steps must be at least 1")
         errors: list[str] = []
         previous_action: RecoveryAction | None = None
+        previous_identity: str | None = None
         attempts = 0
-        for step in range(self.max_steps):
+        for step in range(step_limit):
             action = decide_action(step, list(errors))
             if action is RecoveryAction.STOP:
                 return RecoveryResult(status=RecoveryStatus.STOPPED, attempts=attempts, last_action=action, reason="AI requested a stop", errors=errors)
             if action is RecoveryAction.HUMAN_INTERVENTION:
                 return RecoveryResult(status=RecoveryStatus.NEEDS_HUMAN, attempts=attempts, last_action=action, reason="AI requested human intervention", errors=errors)
-            if action == previous_action:
+            identity = action_identity(action) if action_identity is not None else action.value
+            if identity == previous_identity:
                 return RecoveryResult(status=RecoveryStatus.NEEDS_HUMAN, attempts=attempts, last_action=action, reason="Repeated recovery action stopped by the safety limit", errors=errors)
             handler = handlers.get(action)
             if handler is None:
@@ -44,10 +51,11 @@ class RecoveryManager:
             except Exception as exc:
                 errors.append(f"{action.value}: {type(exc).__name__}: {str(exc)[:300]}")
             previous_action = action
+            previous_identity = identity
         return RecoveryResult(
             status=RecoveryStatus.NEEDS_HUMAN,
             attempts=attempts,
             last_action=previous_action,
-            reason=f"Recovery limit reached ({self.max_steps}); automatic attempts stopped",
+            reason=f"Recovery limit reached ({step_limit}); automatic attempts stopped",
             errors=errors,
         )

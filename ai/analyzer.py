@@ -20,17 +20,32 @@ class AIAnalyzer:
         """请求模型分析失败信息，并解析为结构化结果。"""
         system_prompt = self.prompt_path.read_text(encoding="utf-8")
         user_context = {"failure": failure, "context": context or {}}
-        response = self.client.chat(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(user_context, ensure_ascii=False)},
-            ],
-            response_format={"type": "json_object"},
-        )
-        try:
-            content = response["choices"][0]["message"]["content"]
-            if not isinstance(content, str):
-                raise ValueError("AI response content is not text")
-            return AIAnalysisResult.model_validate_json(content)
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise ValueError("AI provider response did not match AIAnalysisResult") from exc
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_context, ensure_ascii=False)},
+        ]
+        for attempt in range(2):
+            response = self.client.chat(messages, response_format={"type": "json_object"})
+            content: Any = None
+            try:
+                content = response["choices"][0]["message"]["content"]
+                if not isinstance(content, str):
+                    raise ValueError("AI response content is not text")
+                result = json.loads(content)
+                # DeepSeek 偶尔会把响应格式标记复述进内容；只忽略这一已知元数据。
+                if isinstance(result, dict) and result.get("type") == "json_object":
+                    result.pop("type")
+                return AIAnalysisResult.model_validate(result)
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                if attempt == 1:
+                    raise ValueError("AI provider response did not match AIAnalysisResult") from exc
+                messages.extend(
+                    [
+                        {"role": "assistant", "content": content if isinstance(content, str) else "{}"},
+                        {
+                            "role": "user",
+                            "content": "上一个响应不符合结构要求。请只返回符合系统提示词字段的完整 JSON 对象。",
+                        },
+                    ]
+                )
+        raise ValueError("AI provider response did not match AIAnalysisResult")
