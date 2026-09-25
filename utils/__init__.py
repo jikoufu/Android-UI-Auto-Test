@@ -1,1 +1,1 @@
-"""Shared, device-independent helpers."""
+"""设备无关的通用辅助功能。"""

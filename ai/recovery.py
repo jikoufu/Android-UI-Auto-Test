@@ -1,4 +1,4 @@
-"""Bounded recovery execution with repeat-action protection."""
+"""提供有步数上限和重复动作保护的恢复流程。"""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from models.recovery_result import RecoveryResult, RecoveryStatus
 
 class RecoveryManager:
     def __init__(self, max_steps: int = 3) -> None:
+        """设置自动恢复的最大步数。"""
         if max_steps < 1:
             raise ValueError("max_steps must be at least 1")
         self.max_steps = max_steps
@@ -20,6 +21,7 @@ class RecoveryManager:
         handlers: Mapping[RecoveryAction, Callable[[], None]],
         verify: Callable[[], bool],
     ) -> RecoveryResult:
+        """逐步执行恢复动作，成功、熔断或达到上限时停止。"""
         errors: list[str] = []
         previous_action: RecoveryAction | None = None
         attempts = 0

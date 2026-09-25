@@ -1,4 +1,4 @@
-"""Structured AI analysis output."""
+"""AI 失败分析和恢复建议的数据模型。"""
 
 from enum import StrEnum
 
@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class RecoveryAction(StrEnum):
+    """AI 可建议执行的恢复动作。"""
     RETRY = "retry"
     BACK = "back"
     REENTER_PAGE = "reenter_page"
@@ -16,6 +17,7 @@ class RecoveryAction(StrEnum):
 
 
 class AIAnalysisResult(BaseModel):
+    """经过字段校验的 AI 分析结果。"""
     model_config = ConfigDict(extra="forbid")
 
     error_type: str = Field(min_length=1)

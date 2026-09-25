@@ -1,4 +1,4 @@
-"""A bounded tool-calling loop for AI-assisted test analysis."""
+"""用于测试分析的有限次数 AI 工具调用流程。"""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ class AITool:
     handler: Callable[[BaseModel], Any]
 
     def definition(self) -> dict[str, Any]:
+        """生成供 LLM 识别的函数工具定义。"""
         return {
             "type": "function",
             "function": {
@@ -43,31 +44,36 @@ class AITool:
         }
 
     def execute(self, arguments: str) -> str:
+        """校验参数并执行工具，将结果编码为 JSON。"""
         try:
             parsed = self.arguments_model.model_validate_json(arguments)
             result = _json_value(self.handler(parsed))
             return json.dumps({"ok": True, "result": result}, ensure_ascii=False)
         except (ValidationError, ValueError, RuntimeError) as exc:
             return json.dumps({"ok": False, "error": str(exc)[:500]}, ensure_ascii=False)
-        except Exception as exc:  # Keep one device failure from breaking the agent loop.
+        except Exception as exc:  # 单个设备工具失败时保护 Agent 主循环。
             return json.dumps({"ok": False, "error": f"Tool failed: {type(exc).__name__}"}, ensure_ascii=False)
 
 
 class ToolRegistry:
     def __init__(self, tools: list[AITool] | None = None) -> None:
+        """创建注册表，并载入初始工具。"""
         self._tools: dict[str, AITool] = {}
         for tool in tools or []:
             self.register(tool)
 
     def register(self, tool: AITool) -> None:
+        """注册工具；重名时拒绝覆盖已有定义。"""
         if tool.name in self._tools:
             raise ValueError(f"Tool already registered: {tool.name}")
         self._tools[tool.name] = tool
 
     def definitions(self) -> list[dict[str, Any]]:
+        """返回全部工具的 LLM 函数定义。"""
         return [tool.definition() for tool in self._tools.values()]
 
     def execute(self, name: str, arguments: str) -> str:
+        """按名称执行工具，未知名称以 JSON 错误返回。"""
         tool = self._tools.get(name)
         if tool is None:
             return json.dumps({"ok": False, "error": f"Unknown tool: {name}"})
@@ -76,12 +82,14 @@ class ToolRegistry:
 
 class AIAgent:
     def __init__(self, client: ChatClient, max_tool_calls: int = 5) -> None:
+        """初始化模型客户端和单次运行的工具调用上限。"""
         if max_tool_calls < 1:
             raise ValueError("max_tool_calls must be at least 1")
         self.client = client
         self.max_tool_calls = max_tool_calls
 
     def run(self, prompt: str, tools: ToolRegistry, system_prompt: str | None = None) -> AgentRunResult:
+        """运行受调用次数限制的对话与工具执行循环。"""
         messages: list[dict[str, Any]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})

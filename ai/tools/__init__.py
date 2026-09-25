@@ -1,4 +1,4 @@
-"""Adapters that expose existing AndroidTV device methods to the AI agent."""
+"""将 Android TV 现有设备能力适配为 AI Agent 工具。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from devices.tv import AndroidTV
 
 
 def build_device_tools(tv: AndroidTV) -> ToolRegistry:
-    """Build tools by adapting the existing AndroidTV device facade."""
+    """基于 Android TV 门面构建完整设备工具注册表。"""
     return ToolRegistry(
         [
             adb_shell_tool(tv.adb),

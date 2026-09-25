@@ -1,4 +1,4 @@
-"""Remote-control tool adapter; key mapping stays in devices.remote."""
+"""遥控器工具适配层；按键映射由 devices.remote 统一管理。"""
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -12,4 +12,5 @@ class RemoteKeyArguments(BaseModel):
 
 
 def remote_key_tool(remote: RemoteController) -> AITool:
+    """把遥控器按键能力封装为 Agent 工具。"""
     return AITool("press_remote_key", "Press one supported Android TV remote key.", RemoteKeyArguments, lambda args: remote.press_key(args.key))

@@ -1,4 +1,4 @@
-"""Low-level Android TV device connections and controls."""
+"""导出 Android TV 的 ADB、UI 和遥控器设备驱动。"""
 
 from devices.adb import ADBClient, ADBError
 from devices.remote import RemoteController

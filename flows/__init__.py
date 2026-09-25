@@ -1,1 +1,1 @@
-"""Reusable business flows built on top of device controls."""
+"""基于设备能力实现的可复用业务流程。"""

@@ -1,4 +1,4 @@
-"""Small helpers for loading repository YAML configuration safely."""
+"""安全读取项目 YAML 配置的通用辅助函数。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import yaml
 
 
 def load_yaml(path: str | Path) -> dict[str, Any]:
-    """Load a YAML mapping, returning an empty mapping for an empty file."""
+    """读取 YAML 字典；空文件或不存在的文件返回空字典。"""
     config_path = Path(path)
     if not config_path.exists():
         return {}

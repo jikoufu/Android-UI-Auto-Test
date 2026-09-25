@@ -11,15 +11,18 @@ class DoubleArguments(BaseModel):
 
 class FakeClient:
     def __init__(self, responses: list[dict]) -> None:
+        """保存测试响应，供 Agent 按调用顺序读取。"""
         self.responses = responses
         self.messages: list[list[dict]] = []
 
     def chat(self, messages, *, tools=None, response_format=None):
+        """返回下一条预设响应并记录消息历史。"""
         self.messages.append(list(messages))
         return self.responses.pop(0)
 
 
 def _tool_call(value: int = 4) -> dict:
+    """构造一次调用 double 工具的模型响应。"""
     return {"choices": [{"message": {"tool_calls": [{
         "id": "call-1",
         "type": "function",
@@ -28,6 +31,7 @@ def _tool_call(value: int = 4) -> dict:
 
 
 def test_agent_executes_registered_tool_and_returns_final_answer():
+    """验证 Agent 执行工具后返回模型的最终答复。"""
     client = FakeClient([
         _tool_call(),
         {"choices": [{"message": {"content": "The result is 8."}}]},
@@ -45,6 +49,7 @@ def test_agent_executes_registered_tool_and_returns_final_answer():
 
 
 def test_agent_stops_before_exceeding_tool_call_limit():
+    """验证达到工具调用上限后 Agent 会停止。"""
     client = FakeClient([_tool_call(), _tool_call()])
     registry = ToolRegistry([
         AITool("double", "Double a number.", DoubleArguments, lambda args: args.value * 2),

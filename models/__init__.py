@@ -1,1 +1,1 @@
-"""Validated data exchanged between project layers."""
+"""项目各层之间传递的结构化数据模型。"""

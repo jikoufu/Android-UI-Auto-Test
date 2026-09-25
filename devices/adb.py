@@ -1,4 +1,4 @@
-"""ADB command wrapper with explicit device selection and timeouts."""
+"""封装带设备选择和超时控制的 ADB 命令。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from models.device_state import DeviceState
 
 
 class ADBError(RuntimeError):
-    """Raised when an ADB command cannot be completed."""
+    """ADB 命令无法完成时抛出的异常。"""
 
 
 class ADBClient:
@@ -22,12 +22,14 @@ class ADBClient:
         command_timeout: float = 15,
         reports_dir: str | Path = "reports",
     ) -> None:
+        """保存设备 serial、ADB 程序路径、超时和报告目录。"""
         self.serial = serial or None
         self.adb_path = adb_path
         self.command_timeout = command_timeout
         self.reports_dir = Path(reports_dir)
 
     def _command(self, args: Sequence[str]) -> list[str]:
+        """组装包含可选 serial 的 ADB 命令参数。"""
         command = [self.adb_path]
         if self.serial:
             command.extend(["-s", self.serial])
@@ -35,6 +37,7 @@ class ADBClient:
         return command
 
     def run(self, *args: str, timeout: float | None = None) -> str:
+        """运行 ADB 命令；命令失败或超时时抛出 ADBError。"""
         command = self._command(args)
         try:
             result = subprocess.run(
@@ -56,10 +59,11 @@ class ADBClient:
         return result.stdout.strip()
 
     def run_shell(self, command: str, timeout: float | None = None) -> str:
-        """Run one command on the selected Android device."""
+        """在当前选定的 Android 设备上运行 Shell 命令。"""
         return self.run("shell", command, timeout=timeout)
 
     def list_devices(self) -> list[tuple[str, str]]:
+        """读取 ADB 设备列表，返回 serial 与连接状态。"""
         output = self.run("devices", "-l")
         devices: list[tuple[str, str]] = []
         for line in output.splitlines()[1:]:
@@ -69,6 +73,7 @@ class ADBClient:
         return devices
 
     def _selected_serial(self) -> str:
+        """沿用显式 serial，或在仅有一台在线设备时自动选择。"""
         if self.serial:
             return self.serial
         online = [serial for serial, state in self.list_devices() if state == "device"]
@@ -85,6 +90,7 @@ class ADBClient:
         return self._selected_serial()
 
     def current_activity(self) -> str | None:
+        """读取当前前台 Activity；无法解析时返回 None。"""
         output = self.run_shell("dumpsys activity activities")
         patterns = (
             r"mResumedActivity:.*?\s([\w.$]+/[^\s}]+)",
@@ -97,6 +103,7 @@ class ADBClient:
         return None
 
     def dump_ui(self) -> Path:
+        """通过 ADB 命令保存 UIAutomator XML，供诊断或离线分析。"""
         remote_path = "/sdcard/window.xml"
         self.run_shell(f"uiautomator dump {remote_path}", timeout=max(self.command_timeout, 30))
         xml = self.run_shell(f"cat {remote_path}", timeout=max(self.command_timeout, 30))
@@ -107,6 +114,7 @@ class ADBClient:
         return path
 
     def take_screenshot(self) -> Path:
+        """通过 ADB screencap 保存截图，返回图片路径。"""
         command = self._command(["exec-out", "screencap", "-p"])
         try:
             result = subprocess.run(
@@ -127,9 +135,11 @@ class ADBClient:
         return path
 
     def get_device_state(self) -> DeviceState:
+        """收集设备型号、厂商、系统版本和当前 Activity。"""
         serial = self._selected_serial()
 
         def getprop(name: str) -> str | None:
+            """读取系统属性；空值转换为 None。"""
             value = self.run_shell(f"getprop {name}")
             return value or None
 

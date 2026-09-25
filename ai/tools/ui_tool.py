@@ -1,4 +1,4 @@
-"""Structured AI tool adapters; all UI work is delegated to ``UIDriver``."""
+"""AI UI 工具适配层；所有界面操作均委托给 UIDriver。"""
 
 from pydantic import BaseModel, ConfigDict, Field
 

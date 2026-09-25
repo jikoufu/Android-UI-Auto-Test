@@ -1,4 +1,4 @@
-"""Minimal OpenAI-compatible chat client using Python's standard library."""
+"""使用 Python 标准库访问 OpenAI 兼容聊天接口。"""
 
 from __future__ import annotations
 
@@ -19,11 +19,13 @@ class ChatClient(Protocol):
         *,
         tools: list[dict[str, Any]] | None = None,
         response_format: dict[str, str] | None = None,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        """发送聊天消息并返回模型响应。"""
+        ...
 
 
 class AIClientError(RuntimeError):
-    """Raised for configuration or provider request errors."""
+    """AI 服务配置错误或请求失败时抛出的异常。"""
 
 
 class OpenAICompatibleClient:
@@ -35,6 +37,7 @@ class OpenAICompatibleClient:
         timeout: float = 30,
         temperature: float = 0.1,
     ) -> None:
+        """保存服务参数；缺少密钥或模型名时立即报错。"""
         if not api_key:
             raise ValueError("An API key is required")
         if not model:
@@ -47,6 +50,7 @@ class OpenAICompatibleClient:
 
     @classmethod
     def from_environment(cls, config_path: str | Path = "config/ai.yaml") -> "OpenAICompatibleClient":
+        """从 YAML 和环境变量读取模型配置及凭证。"""
         config = load_yaml(config_path)
         key_env = str(config.get("api_key_env", "OPENAI_API_KEY"))
         api_key = os.getenv(key_env, "")
@@ -70,6 +74,7 @@ class OpenAICompatibleClient:
         tools: list[dict[str, Any]] | None = None,
         response_format: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        """发送聊天请求，并返回服务端 JSON 响应。"""
         body: dict[str, Any] = {
             "model": self.model,
             "messages": list(messages),

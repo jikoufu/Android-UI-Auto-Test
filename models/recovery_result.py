@@ -1,4 +1,4 @@
-"""Outcome of a bounded recovery attempt."""
+"""有步数上限的自动恢复执行结果。"""
 
 from enum import StrEnum
 
@@ -8,6 +8,7 @@ from models.ai_result import RecoveryAction
 
 
 class RecoveryStatus(StrEnum):
+    """自动恢复流程的结束状态。"""
     COMPLETED = "completed"
     STOPPED = "stopped"
     NEEDS_HUMAN = "needs_human"
@@ -15,6 +16,7 @@ class RecoveryStatus(StrEnum):
 
 
 class RecoveryResult(BaseModel):
+    """恢复状态、尝试次数、最后动作和错误记录。"""
     model_config = ConfigDict(extra="forbid")
 
     status: RecoveryStatus
