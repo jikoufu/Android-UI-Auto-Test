@@ -13,6 +13,7 @@ from models.agent_result import AgentRunResult, AgentStatus
 
 
 def _json_value(value: Any) -> Any:
+    """递归转换工具结果，确保字典和序列以 JSON 结构返回。"""
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json")
     if isinstance(value, dict):

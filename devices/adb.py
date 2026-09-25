@@ -81,7 +81,7 @@ class ADBClient:
 
     @property
     def device_serial(self) -> str:
-        """Return the selected serial, resolving it once using the shared ADB config."""
+        """返回当前选定的设备 serial；未指定时沿用 ADB 的设备选择规则。"""
         return self._selected_serial()
 
     def current_activity(self) -> str | None:

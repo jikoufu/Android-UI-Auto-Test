@@ -36,7 +36,7 @@ def remote(adb: ADBClient) -> RemoteController:
 
 @pytest.fixture(scope="session")
 def ui(adb: ADBClient) -> UIDriver:
-    """Return a lazy uiautomator2 driver sharing the ADB-selected serial."""
+    """创建延迟连接的 UI 驱动，并复用 ADB fixture 选定的设备。"""
     return UIDriver(adb)
 
 

@@ -24,7 +24,7 @@ class TextArguments(BaseModel):
 
 
 def ui_tools(ui: UIDriver) -> list[AITool]:
-    """Expose the supported UI interface without importing uiautomator2 here."""
+    """把 UIDriver 的 UI 能力注册为结构化 AI 工具，不直接操作设备。"""
     return [
         AITool(
             "find_element",
