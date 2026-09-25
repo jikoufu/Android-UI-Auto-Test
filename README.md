@@ -1,6 +1,8 @@
 # Android TV 自动化测试框架
 
-本项目基于 Pytest 构建 Android TV 自动化测试框架，提供 ADB、UI 和遥控器的基础封装，并为 AI Agent 的失败分析、工具调用和有限次自动恢复提供扩展接口。
+本项目是基于 Pytest 的 Android TV 自动化测试框架。设备层提供 ADB、uiautomator2 和独立的遥控器控制接口，并提供 AI Agent 扩展能力，用于测试失败分析、设备状态理解和有限次数的自动恢复。
+
+项目当前只面向 Android / Android TV，使用 Python + Pytest。uiautomator2 可直接集成 Python，并与现有 ADB、Remote 和 AI Tools 架构保持轻量。当前没有跨平台、Appium Grid 或 Hybrid/WebView 需求，因此当前阶段不引入 Appium；未来需求变化时再评估。
 
 ## 项目目录
 
@@ -16,6 +18,10 @@
 ├── config/                      # AI 和设备的非敏感配置
 ├── data/                        # 测试数据
 ├── devices/                     # ADB、Android TV、遥控器和 UI 驱动
+│   ├── adb.py                   # ADB 系统操作与设备诊断
+│   ├── ui.py                    # 基于 uiautomator2 的 UI 自动化
+│   ├── remote.py                # 遥控器按键接口（当前通过 ADB 发送 keyevent）
+│   └── tv.py                    # Android TV 设备能力的组合入口
 ├── flows/                       # Settings、Network 等业务流程
 ├── models/                      # Pydantic 结构化模型
 ├── reports/                     # 本地日志、截图和 UI dump 输出
@@ -43,9 +49,32 @@ AI Agent → AI Tools → flows / devices
 
 测试断言放在 `tests/`，业务动作放在 `flows/`，真实设备操作集中在 `devices/`。工具适配器不实现 ADB 或遥控器驱动。
 
+```text
+Pytest Tests
+     ↓
+   Flows
+     ↓
+   Devices
+   ├── ADB：系统命令和设备诊断
+   ├── UI：UIDriver → uiautomator2
+   └── RemoteController：遥控器按键（当前由 ADB keyevent 实现）
+```
+
+AI Agent 通过工具适配器调用已存在的业务流程或设备能力：
+
+```text
+AI Agent
+   ↓
+AI Tools
+   ↓
+flows / devices
+```
+
+正式 UI 自动化由 `devices/ui.py` 中的 `UIDriver` 统一封装 uiautomator2。它提供元素定位、点击、等待、UI hierarchy dump 和截图；已有 XML 可用于离线调试和证据分析。ADB 继续处理系统命令和设备诊断，遥控器接口与 UI 驱动保持独立。当前 `RemoteController` 使用 ADB `input keyevent`，USB IR 硬件适配仍待配置。
+
 ## 环境安装
 
-建议 Python 3.10 或更高版本，并安装 Android SDK Platform Tools（提供 `adb`）：
+建议 Python 3.10 或更高版本，并安装 Android SDK Platform Tools（提供 `adb`）。uiautomator2 由 `requirements.txt` 管理：
 
 ```bash
 python -m venv .venv
@@ -58,6 +87,8 @@ Windows PowerShell：
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
+
+`pip install -r requirements.txt` 会一并安装 uiautomator2。首次使用时，确保目标 Android TV 已开启 USB 调试或已通过 ADB 网络连接；连接多台设备时设置 `ANDROID_SERIAL`，ADB 和 UIDriver 会复用同一设备 serial。
 
 macOS / Linux：
 

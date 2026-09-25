@@ -2,7 +2,9 @@
 
 ## 项目定位
 
-本项目是 Android TV 自动化测试框架，核心技术包括 Python、Pytest、ADB、Android UI、USB IR / 遥控器、LLM 和 AI Agent。设备驱动、AI 服务和真实设备测试必须明确标为已实现或待配置，不能虚报可用状态。
+本项目是 Android TV 自动化测试框架，核心技术包括 Python、Pytest、ADB、uiautomator2、Remote / USB IR、LLM 和 AI Agent。设备驱动、AI 服务和真实设备测试必须明确标为已实现或待配置，不能虚报可用状态。
+
+当前项目只面向 Android / Android TV，主要使用 Python + Pytest。uiautomator2 可直接集成 Python，并与现有 ADB、Remote 和 AI Tools 架构保持轻量。当前没有 Android+iOS 跨平台、Appium Grid 或 Hybrid/WebView 等需求，因此当前阶段不引入 Appium；未来需求变化时再重新评估。
 
 ## 目录职责
 
@@ -16,6 +18,24 @@
 - `data/`：测试输入数据；不要放真实凭证或生产敏感数据。
 - `utils/`：设备无关且可复用的基础工具，不放 ADB、遥控器、TV 流程或 Agent 逻辑。
 - `reports/`：运行生成的日志、截图和 UI dump，必须被 Git 忽略。
+
+## UI 自动化
+
+- Android UI 自动化默认使用 `uiautomator2`。
+- `devices/ui.py` 是项目中唯一直接依赖 uiautomator2 的适配层。
+- `tests/`、`flows/`、`ai/tools/` 不得直接导入 uiautomator2。
+- 依赖方向：
+
+```text
+tests → flows → devices/ui.py → uiautomator2
+AI Agent → ai/tools/ui_tool.py → devices/ui.py → uiautomator2
+```
+
+- ADB 不负责正常 UI 元素自动化；ADB 主要负责系统能力、诊断、日志和补充控制。
+- Remote / USB IR 是独立设备能力，不与 uiautomator2 合并。
+- 当前 `RemoteController` 通过 ADB `input keyevent` 发送按键；USB IR 硬件适配尚待配置，文档和测试结果必须如实说明。
+- `UIDriver.dump_ui()` 使用 uiautomator2 采集实时 hierarchy；保存的 XML 可供离线调试和证据分析。
+- 当前阶段不引入 Appium。只有未来出现跨平台、Appium Grid 或 Hybrid/WebView 等明确需求时，才重新评估。
 
 ## 依赖方向
 

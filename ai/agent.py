@@ -15,6 +15,10 @@ from models.agent_result import AgentRunResult, AgentStatus
 def _json_value(value: Any) -> Any:
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)

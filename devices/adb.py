@@ -79,6 +79,11 @@ class ADBClient:
         self.serial = online[0]
         return self.serial
 
+    @property
+    def device_serial(self) -> str:
+        """Return the selected serial, resolving it once using the shared ADB config."""
+        return self._selected_serial()
+
     def current_activity(self) -> str | None:
         output = self.run_shell("dumpsys activity activities")
         patterns = (

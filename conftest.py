@@ -36,6 +36,7 @@ def remote(adb: ADBClient) -> RemoteController:
 
 @pytest.fixture(scope="session")
 def ui(adb: ADBClient) -> UIDriver:
+    """Return a lazy uiautomator2 driver sharing the ADB-selected serial."""
     return UIDriver(adb)
 
 
