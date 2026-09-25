@@ -29,7 +29,7 @@ class RecoveryManager:
             raise ValueError("max_steps must be at least 1")
         errors: list[str] = []
         previous_action: RecoveryAction | None = None
-        previous_identity: str | None = None
+        seen_identities: set[str] = set()
         attempts = 0
         for step in range(step_limit):
             action = decide_action(step, list(errors))
@@ -38,7 +38,7 @@ class RecoveryManager:
             if action is RecoveryAction.HUMAN_INTERVENTION:
                 return RecoveryResult(status=RecoveryStatus.NEEDS_HUMAN, attempts=attempts, last_action=action, reason="AI requested human intervention", errors=errors)
             identity = action_identity(action) if action_identity is not None else action.value
-            if identity == previous_identity:
+            if identity in seen_identities:
                 return RecoveryResult(status=RecoveryStatus.NEEDS_HUMAN, attempts=attempts, last_action=action, reason="Repeated recovery action stopped by the safety limit", errors=errors)
             handler = handlers.get(action)
             if handler is None:
@@ -51,7 +51,7 @@ class RecoveryManager:
             except Exception as exc:
                 errors.append(f"{action.value}: {type(exc).__name__}: {str(exc)[:300]}")
             previous_action = action
-            previous_identity = identity
+            seen_identities.add(identity)
         return RecoveryResult(
             status=RecoveryStatus.NEEDS_HUMAN,
             attempts=attempts,

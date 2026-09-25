@@ -3,7 +3,12 @@ base_url: https://api.deepseek.com
 model: deepseek-flash
 api_key_env: DEEPSEEK_API_KEY
 temperature: 0.1
+thinking: disabled
+max_tokens: 800
 timeout: 30
 max_tool_calls: 5
 max_recovery_steps: 3
 min_recovery_confidence: 0.75
+navigate_confidence: 0.70
+back_confidence: 0.55
+scroll_confidence: 0.45

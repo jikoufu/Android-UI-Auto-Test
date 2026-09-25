@@ -36,6 +36,8 @@ class OpenAICompatibleClient:
         base_url: str = "https://api.openai.com/v1",
         timeout: float = 30,
         temperature: float = 0.1,
+        thinking: str | None = None,
+        max_tokens: int | None = None,
     ) -> None:
         """保存服务参数；缺少密钥或模型名时立即报错。"""
         if not api_key:
@@ -47,6 +49,12 @@ class OpenAICompatibleClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.temperature = temperature
+        if thinking not in {None, "enabled", "disabled"}:
+            raise ValueError("thinking must be enabled, disabled, or None")
+        if max_tokens is not None and max_tokens < 1:
+            raise ValueError("max_tokens must be positive")
+        self.thinking = thinking
+        self.max_tokens = max_tokens
 
     @classmethod
     def from_environment(cls, config_path: str | Path = "config/ai.yaml") -> "OpenAICompatibleClient":
@@ -65,6 +73,8 @@ class OpenAICompatibleClient:
             base_url=os.getenv("OPENAI_BASE_URL", str(config.get("base_url", "https://api.openai.com/v1"))),
             timeout=float(os.getenv("AI_TIMEOUT", config.get("timeout", 30))),
             temperature=float(config.get("temperature", 0.1)),
+            thinking=str(config["thinking"]) if config.get("provider") == "deepseek" and config.get("thinking") else None,
+            max_tokens=int(config["max_tokens"]) if config.get("max_tokens") else None,
         )
 
     def chat(
@@ -80,6 +90,10 @@ class OpenAICompatibleClient:
             "messages": list(messages),
             "temperature": self.temperature,
         }
+        if self.thinking is not None:
+            body["thinking"] = {"type": self.thinking}
+        if self.max_tokens is not None:
+            body["max_tokens"] = self.max_tokens
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"

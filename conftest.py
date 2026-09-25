@@ -65,6 +65,9 @@ def ai_executor(
         tv=tv,
         ui=ui,
         min_recovery_confidence=float(ai_config.get("min_recovery_confidence", 0.75)),
+        navigate_confidence=float(ai_config.get("navigate_confidence", 0.70)),
+        back_confidence=float(ai_config.get("back_confidence", 0.55)),
+        scroll_confidence=float(ai_config.get("scroll_confidence", 0.45)),
     )
 
 

@@ -384,6 +384,105 @@ def test_ai_navigation_refuses_target_unless_visible():
     assert error.value.recovery_attempts == 1
 
 
+def test_two_backs_on_different_pages_are_allowed():
+    """验证不同页面连续返回不会被重复动作熔断。"""
+    analyzer = FakeAnalyzer(_analysis(RecoveryAction.BACK), _analysis(RecoveryAction.BACK))
+    ui = FakeUI()
+    collector = FakeContextCollector(ui_texts=[["页面 C"], ["页面 B"]])
+    executor = _executor(analyzer, ui=ui, collector=collector)
+
+    # Step 1：模拟从页面 C 经过页面 B 返回目标页面 A。
+    executor.run_step(
+        name="连续返回两级",
+        action=lambda: (_ for _ in ()).throw(RuntimeError("wrong page")),
+        verify=lambda: ui.back_calls == 2,
+        back_retries_action=False,
+    )
+
+    # Step 2：确认两个不同页面上的 BACK 都已执行，起点是第一次失败现场。
+    assert ui.back_calls == 2
+    assert analyzer.calls[1]["context"]["starting_state"]["ui_texts"] == ["页面 C"]
+
+
+def test_same_action_on_same_page_stops_before_second_back():
+    """验证页面无变化时重复返回会触发熔断。"""
+    analyzer = FakeAnalyzer(_analysis(RecoveryAction.BACK), _analysis(RecoveryAction.BACK))
+    ui = FakeUI()
+    collector = FakeContextCollector(ui_texts=[["页面 C"], ["页面 C"]])
+    executor = _executor(analyzer, ui=ui, collector=collector)
+
+    # Step 1：模拟 BACK 后页面仍停留在同一状态。
+    with pytest.raises(AIRecoveryError, match="Repeated recovery action"):
+        executor.run_step(
+            name="相同页面返回熔断",
+            action=lambda: (_ for _ in ()).throw(RuntimeError("wrong page")),
+            verify=lambda: False,
+            back_retries_action=False,
+        )
+
+    # Step 2：确认第二次 BACK 未发送给设备。
+    assert ui.back_calls == 1
+
+
+def test_same_navigation_label_on_different_pages_is_allowed():
+    """验证不同页面的同名入口可以各点击一次。"""
+    analyzer = FakeAnalyzer(
+        _analysis(RecoveryAction.NAVIGATE, target_text="更多"),
+        _analysis(RecoveryAction.NAVIGATE, target_text="更多"),
+    )
+    ui = FakeUI()
+    collector = FakeContextCollector(ui_texts=[["页面 A", "更多"], ["页面 B", "更多"]])
+    executor = _executor(analyzer, ui=ui, collector=collector)
+
+    # Step 1：模拟两个层级均显示“更多”，并逐层进入。
+    executor.run_step(
+        name="不同页面同名入口",
+        action=lambda: (_ for _ in ()).throw(RuntimeError("target absent")),
+        verify=lambda: len(ui.clicked_texts) == 2,
+    )
+
+    # Step 2：确认相同文字在不同页面可分别点击。
+    assert ui.clicked_texts == ["更多", "更多"]
+
+
+def test_low_confidence_navigation_does_not_click():
+    """验证点击建议低于独立门槛时不会操作设备。"""
+    analyzer = FakeAnalyzer(_analysis(RecoveryAction.NAVIGATE, confidence=0.6, target_text="系统"))
+    ui = FakeUI()
+    executor = _executor(analyzer, ui=ui, collector=FakeContextCollector(ui_texts=[["系统"]]))
+
+    # Step 1：让 AI 给出可见但置信度不足的点击建议。
+    with pytest.raises(AIRecoveryError, match="threshold 0.70"):
+        executor.run_step(
+            name="低置信度点击",
+            action=lambda: (_ for _ in ()).throw(RuntimeError("target absent")),
+        )
+
+    # Step 2：确认未执行真实点击。
+    assert ui.clicked_texts == []
+
+
+def test_context_uses_visible_elements_without_sending_full_xml(tmp_path):
+    """验证完整 XML 留作证据且模型只接收可见节点。"""
+    dump_path = tmp_path / "window.xml"
+    dump_path.write_text(
+        '<hierarchy><node text="系统" resource-id="settings/system" clickable="true" '
+        'scrollable="false" visible-to-user="true"/><node text="隐藏" '
+        'visible-to-user="false"/></hierarchy>',
+        encoding="utf-8",
+    )
+    collector = FailureContextCollector(FakeTV(), FakeUI(dump_path=dump_path))
+
+    # Step 1：从本地 XML 采集恢复现场。
+    context = collector.collect(step_name="settings", error=RuntimeError("missing"), attempt=1)
+
+    # Step 2：确认模型上下文仅含可见元素，原始 XML 文件仍可查阅。
+    assert context["ui_hierarchy"] is None
+    assert context["ui_texts"] == ["系统"]
+    assert context["ui_elements"][0]["resource_id"] == "settings/system"
+    assert context["ui_dump_path"] == str(dump_path)
+
+
 def test_executor_writes_utf8_decision_and_action_trace(tmp_path):
     """验证恢复日志包含中文理由、决策字段和实际执行动作。"""
     log_path = tmp_path / "ai_recovery.jsonl"

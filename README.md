@@ -121,7 +121,7 @@ pytest --collect-only -q
 pytest unit_tests/test_recovery.py -v
 ```
 
-纯单元测试统一放在 `unit_tests/`，不需要连接 Android 设备或配置 AI Provider。`tests/` 保留业务集成与真实设备场景；真实设备测试应使用 `device` marker，并在运行环境已准备好设备后执行。
+纯单元测试统一放在 `unit_tests/`，不需要连接 Android 设备或配置 AI Provider。普通 `pytest` 默认排除 `device` 和 `ai` marker；`tests/` 保留业务集成与真实设备场景。连接设备并设置 `ANDROID_SERIAL` 后，可用 `pytest -m device` 显式运行设备用例；AI 用例还需配置 `DEEPSEEK_API_KEY`，可用 `pytest -m "device and ai"` 选择。
 
 ## AI 配置
 
@@ -144,7 +144,7 @@ Agent 工具调用默认最多 5 次，恢复默认最多 3 步；达到上限�
 
 ### AI Recoverable Step
 
-`AIExecutor.run_step()` 在单个测试步骤内处理动作、结果校验和受限恢复。正常情况下直接返回动作结果；步骤失败时收集错误、当前 Activity、设备状态和 UI hierarchy，交给 `AIAnalyzer` 返回结构化 `RecoveryAction`，再由 `RecoveryManager` 按置信度门槛和恢复步数上限执行白名单动作。测试只提供目标路径；AI 根据当前页面自行判断返回、滚动或点击哪个可见入口。每次动作后都会重新采集现场和分析，点击目标必须出现在最新 UI hierarchy 中。
+`AIExecutor.run_step()` 在单个测试步骤内处理动作、结果校验和受限恢复。正常情况下直接返回动作结果；步骤失败时收集错误、当前 Activity、设备状态和精简的可见 UI 节点，交给 `AIAnalyzer` 返回结构化 `RecoveryAction`，再由 `RecoveryManager` 按置信度门槛和恢复步数上限执行白名单动作。测试只提供目标路径；AI 根据当前页面自行判断返回、滚动或点击哪个可见入口。每次动作后都会重新采集现场和分析，点击目标必须出现在最新可见节点中。
 
 ```python
 ai_executor.run_step(
@@ -160,7 +160,7 @@ ai_executor.run_step(
 Step → Failure → Context Collection → AI Analyzer → RecoveryAction → Bounded Recovery
 ```
 
-`config/ai.yaml` 中一般恢复动作的 `min_recovery_confidence` 默认是 `0.75`，`max_recovery_steps` 默认是 `3`。只关闭当前页的返回和不点击菜单的滚动最低置信度为 `0.4`；点击动作最低为 `0.4`，且目标必须是 AI 根据当前现场选出的可见完整文字。具体测试可为较长导航目标设置更高但仍有限的步数。连续相同动作会熔断；无效结构化响应最多纠正重试一次。恢复失败或达到上限时，步骤以 `AIRecoveryError` 失败并要求人工介入。默认工具注册表不开放任意 `adb_shell`。
+`config/ai.yaml` 中一般恢复动作的 `min_recovery_confidence` 默认是 `0.75`，`max_recovery_steps` 默认是 `3`。点击、返回、滚动的默认门槛分别是 `0.70`、`0.55`、`0.45`；点击目标还必须是当前可见的完整文字。具体测试可为较长导航目标设置更高但仍有限的步数。相同页面状态上重复执行同一动作会熔断，不同页面允许连续返回或点击同名入口；无效结构化响应最多纠正重试一次。恢复失败或达到上限时，步骤以 `AIRecoveryError` 失败并要求人工介入。默认工具注册表不开放任意 `adb_shell`。
 
 设置页面导航示例：测试目标写作“设置 → 我的设备 → 开发者选项”。AI 在“我的设备”页面找不到目标时，可返回设置，检查当前可见页面并按需向下滚动，再从实时层级中选择它判断合适的入口；每次只执行一个动作并根据新现场继续判断。
 
@@ -174,7 +174,7 @@ Get-Content reports/logs/ai_recovery.jsonl | ForEach-Object { $_ | ConvertFrom-J
   Format-List timestamp, run_id, event, current_activity, decision_steps, reason, evidence, suggested_action, target_text, scroll_direction, confidence, accepted, action, passed
 ```
 
-失败现场会保存 UI hierarchy 和截图路径。当前 AI Analyzer 会读取受长度限制的 UI XML 文本，但不会读取截图像素；截图目前只作为测试证据保存，视觉分析留待后续迭代。
+失败现场会保存完整 UI XML 和截图路径。当前 AI Analyzer 默认只读取最多 80 个可见 UI 节点，不读取原始 XML 或截图像素；XML 和截图作为测试证据保存。DeepSeek 恢复请求默认关闭 thinking，并将输出限制为 800 tokens；这些参数和置信度门槛均在 `config/ai.yaml` 配置。
 
 真实 AI 设备导航场景位于 `tests/test_ai_settings_navigation.py`，需要连接 Android 设备并配置 `DEEPSEEK_API_KEY` 后单独运行。该场景从“我的设备”误入路径开始，要求 AI 逐项导航至开发者选项并验证页面中的 USB 调试设置。
 

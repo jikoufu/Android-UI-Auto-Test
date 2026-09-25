@@ -4,6 +4,14 @@ from ai.executor import AIRecoveryError
 from flows.settings_flow import SettingsFlow
 
 
+def is_developer_options_page(ui) -> bool:
+    """用同一组页面特征判断是否进入开发者选项。"""
+    return any(
+        ui.exists("text", label, timeout=2)
+        for label in ("开启开发者选项", "USB调试", "USB 调试", "USB debugging")
+    )
+
+
 @pytest.mark.device
 @pytest.mark.ai
 def test_ai_navigates_from_my_device_to_developer_options(ai_executor, tv, ui):
@@ -24,10 +32,7 @@ def test_ai_navigates_from_my_device_to_developer_options(ai_executor, tv, ui):
             action=lambda: ui.click_text("开发者选项", timeout=3),
             back_retries_action=False,
             max_recovery_steps=10,
-            verify=lambda: any(
-                ui.exists("text", label, timeout=2)
-                for label in ("开启开发者选项", "USB调试", "USB 调试", "USB debugging")
-            ),
+            verify=lambda: is_developer_options_page(ui),
         )
     except AIRecoveryError as error:
         print(
@@ -44,8 +49,5 @@ def test_ai_navigates_from_my_device_to_developer_options(ai_executor, tv, ui):
         raise
 
     # Step 3：确认最终已进入开发者选项页面。
-    assert any(
-        ui.exists("text", label, timeout=2)
-        for label in ("开发者选项", "开启开发者选项")
-    )
+    assert is_developer_options_page(ui)
     print(f"AI 路径日志：{ai_executor.trace_path}")

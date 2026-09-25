@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from hashlib import sha256
+import json
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -54,17 +56,26 @@ class AIExecutor:
         tv: AndroidTV,
         ui: UIDriver,
         min_recovery_confidence: float = 0.75,
+        navigate_confidence: float = 0.70,
+        back_confidence: float = 0.55,
+        scroll_confidence: float = 0.45,
         trace_path: str | Path | None = None,
     ) -> None:
         """注入共享分析器、设备对象和受限恢复管理器。"""
-        if not 0 <= min_recovery_confidence <= 1:
-            raise ValueError("min_recovery_confidence must be between 0 and 1")
+        for threshold in (min_recovery_confidence, navigate_confidence, back_confidence, scroll_confidence):
+            if not 0 <= threshold <= 1:
+                raise ValueError("confidence thresholds must be between 0 and 1")
         self.analyzer = analyzer
         self.context_collector = context_collector
         self.recovery_manager = recovery_manager
         self.tv = tv
         self.ui = ui
         self.min_recovery_confidence = min_recovery_confidence
+        self.action_confidence = {
+            RecoveryAction.NAVIGATE: navigate_confidence,
+            RecoveryAction.BACK: back_confidence,
+            RecoveryAction.SCROLL: scroll_confidence,
+        }
         default_trace_path = Path(getattr(ui, "reports_dir", "reports")) / "logs" / "ai_recovery.jsonl"
         self.trace_path = Path(trace_path or default_trace_path)
         self.trace_logger = AITraceLogger(self.trace_path)
@@ -91,6 +102,7 @@ class AIExecutor:
         navigation_safety_error: str | None = None
         action_history: list[dict[str, str]] = []
         observed_states: list[dict[str, Any]] = []
+        starting_state: dict[str, Any] | None = None
         run_id = uuid4().hex
 
         def trace(event: str, **details: Any) -> None:
@@ -137,7 +149,7 @@ class AIExecutor:
         original_error = latest_error or RuntimeError("Step failed without an exception")
 
         def decide_action(attempt: int, previous_errors: list[str]) -> RecoveryAction:
-            nonlocal latest_analysis, latest_context
+            nonlocal latest_analysis, latest_context, starting_state
             if navigation_safety_error is not None:
                 return RecoveryAction.HUMAN_INTERVENTION
             current_error = latest_error or original_error
@@ -148,14 +160,15 @@ class AIExecutor:
                 previous_errors=previous_errors,
             )
             latest_context["goal"] = goal or name
-            latest_context["starting_context"] = name
             latest_context["previous_actions"] = list(action_history)
-            observed_states.append(
-                {
-                    "current_activity": latest_context.get("current_activity"),
-                    "ui_texts": list(latest_context.get("ui_texts", []))[:80],
-                }
-            )
+            current_state = {
+                "current_activity": latest_context.get("current_activity"),
+                "ui_texts": list(latest_context.get("ui_texts", []))[:30],
+            }
+            if starting_state is None:
+                starting_state = current_state
+            latest_context["starting_state"] = starting_state
+            observed_states.append(current_state)
             latest_context["observed_states"] = list(observed_states)
             try:
                 latest_analysis = self.analyzer.analyze(
@@ -173,13 +186,9 @@ class AIExecutor:
                 )
                 raise
             # 返回键只关闭当前层级，风险低于点击菜单；仍要求模型明确选择 back。
-            minimum_confidence = self.min_recovery_confidence
-            if latest_analysis.suggested_action is RecoveryAction.BACK:
-                minimum_confidence = 0.4
-            elif latest_analysis.suggested_action is RecoveryAction.SCROLL:
-                minimum_confidence = 0.4
-            elif latest_analysis.suggested_action is RecoveryAction.NAVIGATE:
-                minimum_confidence = min(self.min_recovery_confidence, 0.4)
+            minimum_confidence = self.action_confidence.get(
+                latest_analysis.suggested_action, self.min_recovery_confidence
+            )
             accepted = latest_analysis.confidence >= minimum_confidence
             print(
                 f"AI 决策摘要 [{attempt + 1}]：目标={goal or name}；"
@@ -198,7 +207,7 @@ class AIExecutor:
                 failure=f"{type(current_error).__name__}: {current_error}"[:1000],
                 current_activity=latest_context.get("current_activity"),
                 goal=goal or name,
-                starting_context=name,
+                starting_state=starting_state,
                 visible_ui_texts=latest_context.get("ui_texts", []),
                 scrollable_nodes=latest_context.get("scrollable_nodes", []),
                 ui_dump_path=latest_context.get("ui_dump_path"),
@@ -278,12 +287,19 @@ class AIExecutor:
             trace("action_completed", action="scroll", direction=direction)
 
         def action_identity(action: RecoveryAction) -> str:
+            context = latest_context or {}
+            state = {
+                "activity": context.get("current_activity"),
+                "elements": context.get("ui_elements"),
+                "texts": context.get("ui_texts"),
+            }
+            observed = any(state.values())
+            state_hash = sha256(json.dumps(state, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16] if observed else "unknown"
             if action is RecoveryAction.NAVIGATE and latest_analysis is not None:
-                return f"navigate:{latest_analysis.target_text}"
+                return f"navigate:{latest_analysis.target_text}:{state_hash}"
             if action is RecoveryAction.SCROLL and latest_analysis is not None:
-                visible_texts = (latest_context or {}).get("ui_texts", [])
-                return f"scroll:{latest_analysis.scroll_direction}:{'|'.join(visible_texts)[:500]}"
-            return action.value
+                return f"scroll:{latest_analysis.scroll_direction}:{state_hash}"
+            return f"{action.value}:{state_hash}"
 
         handlers: dict[RecoveryAction, Callable[[], None]] = {
             RecoveryAction.RETRY: retry_original,
@@ -323,18 +339,13 @@ class AIExecutor:
             trace("step_completed", recovery_attempts=recovery.attempts, log_path=str(self.trace_logger.path))
             return latest_result
 
-        if (
-            latest_analysis is not None
-            and latest_analysis.confidence < self.min_recovery_confidence
-            and latest_analysis.suggested_action not in {RecoveryAction.BACK, RecoveryAction.SCROLL}
-            and not (
-                latest_analysis.suggested_action is RecoveryAction.NAVIGATE
-                and latest_analysis.confidence >= min(self.min_recovery_confidence, 0.4)
-            )
-        ):
+        required_confidence = self.action_confidence.get(
+            latest_analysis.suggested_action, self.min_recovery_confidence
+        ) if latest_analysis is not None else self.min_recovery_confidence
+        if latest_analysis is not None and latest_analysis.confidence < required_confidence:
             reason = (
                 f"AI confidence {latest_analysis.confidence:.2f} is below the required "
-                f"threshold {self.min_recovery_confidence:.2f}; human intervention is required"
+                f"threshold {required_confidence:.2f}; human intervention is required"
             )
         elif latest_analysis is not None and recovery.status is RecoveryStatus.STOPPED:
             reason = latest_analysis.reason
