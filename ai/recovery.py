@@ -22,6 +22,7 @@ class RecoveryManager:
         verify: Callable[[], bool],
         action_identity: Callable[[RecoveryAction], str] | None = None,
         max_steps: int | None = None,
+        fatal_exceptions: tuple[type[Exception], ...] = (),
     ) -> RecoveryResult:
         """逐步执行恢复动作，成功、熔断或达到上限时停止。"""
         step_limit = self.max_steps if max_steps is None else max_steps
@@ -48,6 +49,8 @@ class RecoveryManager:
                 handler()
                 if verify():
                     return RecoveryResult(status=RecoveryStatus.COMPLETED, attempts=attempts, last_action=action, reason="Recovery succeeded", errors=errors)
+            except fatal_exceptions:
+                raise
             except Exception as exc:
                 errors.append(f"{action.value}: {type(exc).__name__}: {str(exc)[:300]}")
             previous_action = action

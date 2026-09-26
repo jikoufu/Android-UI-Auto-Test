@@ -1,4 +1,7 @@
+import pytest
+
 from ai.recovery import RecoveryManager
+from devices.ui import DeviceTransportError
 from models.ai_result import RecoveryAction
 from models.recovery_result import RecoveryStatus
 
@@ -43,3 +46,28 @@ def test_recovery_can_stop_for_human_intervention():
 
     assert result.status is RecoveryStatus.NEEDS_HUMAN
     assert result.attempts == 0
+
+
+def test_fatal_device_transport_error_is_not_sent_to_next_ai_decision():
+    """验证恢复动作的设备通信故障直接中止业务恢复循环。"""
+    decisions = 0
+
+    def decide(_step, _errors):
+        nonlocal decisions
+        decisions += 1
+        return RecoveryAction.BACK
+
+    def disconnected():
+        raise DeviceTransportError("Device UI transport unavailable")
+
+    # Step 1：让第一次恢复动作遭遇设备通信故障。
+    with pytest.raises(DeviceTransportError):
+        RecoveryManager(max_steps=3).recover(
+            decide_action=decide,
+            handlers={RecoveryAction.BACK: disconnected},
+            verify=lambda: False,
+            fatal_exceptions=(DeviceTransportError,),
+        )
+
+    # Step 2：确认没有进入下一轮 AI 决策。
+    assert decisions == 1

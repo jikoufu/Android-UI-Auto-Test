@@ -89,9 +89,9 @@ def remote(adb: ADBClient) -> RemoteController:
 
 
 @pytest.fixture(scope="session")
-def ui(adb: ADBClient) -> UIDriver:
+def ui(adb: ADBClient, device_config: dict[str, object]) -> UIDriver:
     """创建延迟连接的 UI 驱动，并复用 ADB fixture 选定的设备。"""
-    return UIDriver(adb)
+    return UIDriver(adb, hierarchy_dump_attempts=int(device_config.get("hierarchy_dump_attempts", 2)))
 
 
 @pytest.fixture(scope="session")

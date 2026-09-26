@@ -72,7 +72,11 @@ AI Agent → ai/tools → flows / devices
 - 所有自动恢复必须遵循配置的最大步数和最小 confidence threshold，并只执行明确列出的白名单动作。
 - 测试应向 AI 提供目标路径和当前设备证据，不预先指定菜单路径。AI 可在有限步数内返回、纵向滚动或点击；点击目标必须出现在本次失败现场采集到的可见 UI hierarchy 中，每次动作后重新分析，不能猜测或跳过层级。
 - 恢复超过上限、动作重复、置信度不足、AI 请求失败或证据不足时停止自动操作，并抛出清晰错误请求人工介入。
+- Prompt 只说明导航规则；Executor 在每次 `run_step()` 内维护页面指纹、已探索边和导航路径，过滤候选并在点击前强制拒绝同一父页面下的重复入口。不同父页面的同名入口可分别探索。
+- 页面指纹只使用当前 Activity 及应用节点的稳定文字、无障碍描述、资源 ID、可点击和可滚动属性；不得使用焦点、坐标或系统状态栏动态内容。
 - 失败现场应尽可能保存当前 Activity、设备状态、UI hierarchy 和截图；截图当前只作为证据保存，不能声称 AI Analyzer 已读取图像内容。
+- 设备状态在一次 Collector 生命周期内缓存；首次失败和最终失败截图，中间导航轮次默认只采集 Activity 与 UI hierarchy。单项采集失败不得阻止其他证据采集。
+- 设备通信异常优先由 `devices/` 层有限自愈，不交给 LLM 判断；RemoteDisconnected、连接重置和短暂 transport timeout 最多重连并重试一次，再尝试已有 ADB hierarchy 降级。禁止无限重连；全部失败时抛出清晰的 `DeviceTransportError`。
 - `AIExecutor` 的审计日志写入 `reports/logs/ai_recovery.jsonl`，需记录 AI 返回的理由、证据、置信度、当前页面摘要和执行结果；不得记录 API Key 或 Token。
 - 默认设备 Agent Tool Registry 不得注册任意 `adb_shell`。`adb_shell_tool()` 可保留，但不得加入默认工具集。
 - `tests/` 不直接创建或调用 AI Provider；AI 失败分析与 Step 恢复必须通过 `ai/analyzer.py` 和 `ai/executor.py`。

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from devices.tv import AndroidTV
-from devices.ui import UIDriver
+from devices.ui import DeviceTransportError, UIDriver
 
 
 class FailureContextCollector:
@@ -18,6 +18,7 @@ class FailureContextCollector:
         self.tv = tv
         self.ui = ui
         self.max_ui_chars = max_ui_chars
+        self._cached_device_state: Any | None = None
 
     def collect(
         self,
@@ -26,6 +27,8 @@ class FailureContextCollector:
         error: Exception,
         attempt: int,
         previous_errors: list[str] | None = None,
+        include_screenshot: bool = True,
+        refresh_device_state: bool = False,
     ) -> dict[str, Any]:
         """独立采集各项设备证据，单项失败时保留错误并继续。"""
         context: dict[str, Any] = {
@@ -37,6 +40,9 @@ class FailureContextCollector:
             "current_activity": None,
             "device_state": None,
             "ui_dump_path": None,
+            "ui_dump_backend": None,
+            "transport_recovery": None,
+            "transport_unavailable": False,
             "ui_hierarchy": None,
             "ui_hierarchy_truncated": False,
             "ui_texts": [],
@@ -52,15 +58,21 @@ class FailureContextCollector:
         except Exception as exc:
             context["current_activity_error"] = self._error_summary(exc)
 
-        try:
-            state = self.tv.get_device_state()
-            context["device_state"] = state.model_dump(mode="json") if hasattr(state, "model_dump") else state
-        except Exception as exc:
-            context["device_state_error"] = self._error_summary(exc)
+        if refresh_device_state:
+            self._cached_device_state = None
+        if self._cached_device_state is None:
+            try:
+                state = self.tv.get_device_state()
+                self._cached_device_state = state.model_dump(mode="json") if hasattr(state, "model_dump") else state
+            except Exception as exc:
+                context["device_state_error"] = self._error_summary(exc)
+        context["device_state"] = self._cached_device_state
 
         try:
             dump_path = Path(self.ui.dump_ui())
             context["ui_dump_path"] = str(dump_path)
+            context["ui_dump_backend"] = getattr(self.ui, "last_dump_backend", None)
+            context["transport_recovery"] = getattr(self.ui, "last_transport_recovery", None)
             try:
                 hierarchy = dump_path.read_text(encoding="utf-8")
                 if self.max_ui_chars:
@@ -81,11 +93,15 @@ class FailureContextCollector:
                 context["ui_hierarchy_error"] = self._error_summary(exc)
         except Exception as exc:
             context["ui_dump_error"] = self._error_summary(exc)
+            context["ui_dump_backend"] = getattr(self.ui, "last_dump_backend", None)
+            context["transport_recovery"] = getattr(self.ui, "last_transport_recovery", None)
+            context["transport_unavailable"] = isinstance(exc, DeviceTransportError)
 
-        try:
-            context["screenshot_path"] = str(self.ui.take_screenshot())
-        except Exception as exc:
-            context["screenshot_error"] = self._error_summary(exc)
+        if include_screenshot:
+            try:
+                context["screenshot_path"] = str(self.ui.take_screenshot())
+            except Exception as exc:
+                context["screenshot_error"] = self._error_summary(exc)
 
         return context
 
@@ -116,6 +132,7 @@ class FailureContextCollector:
                 "content_desc": description,
                 "resource_id": attrs.get("resource-id", "")[:120],
                 "class": attrs.get("class", "")[:100],
+                "package": attrs.get("package", "")[:120],
                 "clickable": clickable,
                 "scrollable": scrollable,
                 "bounds": attrs.get("bounds", ""),

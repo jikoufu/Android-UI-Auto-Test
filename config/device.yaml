@@ -1,4 +1,5 @@
 adb_path: adb
 serial: ""
 command_timeout: 15
+hierarchy_dump_attempts: 2
 reports_dir: reports

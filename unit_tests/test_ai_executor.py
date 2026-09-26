@@ -5,9 +5,10 @@ from types import SimpleNamespace
 import pytest
 
 from ai.context import FailureContextCollector
-from ai.executor import AIExecutor, AIRecoveryError
+from ai.executor import AIExecutor, AIRecoveryError, build_state_fingerprint
 from ai.recovery import RecoveryManager
 from ai.tools import build_device_tools
+from devices.ui import DeviceTransportError
 from models.ai_result import AIAnalysisResult, RecoveryAction
 from models.device_state import DeviceState
 
@@ -41,12 +42,18 @@ class FakeUI:
         self.screenshot_error = screenshot_error
         self.back_calls = 0
         self.dump_calls = 0
+        self.screenshot_calls = 0
         self.clicked_texts: list[str] = []
         self.scroll_directions: list[str] = []
 
     def click_text(self, text: str, timeout: float = 10) -> bool:
         """记录按文字点击，模拟导航目标执行。"""
         self.clicked_texts.append(text)
+        return True
+
+    def click_visible_label(self, label: str, timeout: float = 10) -> bool:
+        """记录按可见文字或描述点击导航目标。"""
+        self.clicked_texts.append(label)
         return True
 
     def back(self) -> None:
@@ -66,22 +73,42 @@ class FakeUI:
 
     def take_screenshot(self) -> Path:
         """返回截图路径，或按配置模拟截图失败。"""
+        self.screenshot_calls += 1
         if self.screenshot_error is not None:
             raise self.screenshot_error
         return Path("reports/fake.png")
 
 
 class FakeContextCollector:
-    def __init__(self, ui_texts: list[list[str]] | None = None) -> None:
+    def __init__(
+        self,
+        ui_texts: list[list[str]] | None = None,
+        ui_elements: list[list[dict[str, object]]] | None = None,
+        current_activities: list[str] | None = None,
+    ) -> None:
         """收集执行器传入的失败步骤元数据。"""
         self.calls: list[dict[str, object]] = []
         self.ui_texts = list(ui_texts or [])
+        self.ui_elements = list(ui_elements or [])
+        self.current_activities = list(current_activities or [])
 
     def collect(self, **kwargs: object) -> dict[str, object]:
         """记录采集请求并返回可供假分析器读取的上下文。"""
         self.calls.append(kwargs)
         texts = self.ui_texts.pop(0) if self.ui_texts else []
-        return {"step_name": kwargs["step_name"], "attempt": kwargs["attempt"], "ui_texts": texts}
+        elements = self.ui_elements.pop(0) if self.ui_elements else [
+            {"text": text, "content_desc": "", "resource_id": "", "clickable": True, "scrollable": False}
+            for text in texts
+        ]
+        activity = self.current_activities.pop(0) if self.current_activities else None
+        return {
+            "step_name": kwargs["step_name"],
+            "attempt": kwargs["attempt"],
+            "current_activity": activity,
+            "ui_texts": texts,
+            "ui_elements": elements,
+            "scrollable_nodes": [element for element in elements if element.get("scrollable")],
+        }
 
 
 def _analysis(
@@ -424,6 +451,43 @@ def test_same_action_on_same_page_stops_before_second_back():
     assert ui.back_calls == 1
 
 
+def test_focus_and_bounds_changes_do_not_hide_same_page_loop():
+    """验证焦点和坐标变化不影响同一页面的重复动作熔断。"""
+    analyzer = FakeAnalyzer(_analysis(RecoveryAction.BACK), _analysis(RecoveryAction.BACK))
+    ui = FakeUI()
+    collector = FakeContextCollector(
+        ui_texts=[["系统设置"], ["系统设置"]],
+        ui_elements=[
+            [
+                {"text": "系统设置", "resource_id": "settings/system", "package": "com.android.settings",
+                 "clickable": True, "scrollable": False, "bounds": "[0,0][100,100]", "focused": False},
+                {"text": "2:31", "resource_id": "status/time", "package": "com.android.systemui"},
+                {"text": "1KB/s", "resource_id": "status/network", "package": "com.android.systemui"},
+            ],
+            [
+                {"text": "系统设置", "resource_id": "settings/system", "package": "com.android.settings",
+                 "clickable": True, "scrollable": False, "bounds": "[20,20][120,120]", "focused": True},
+                {"text": "2:32", "resource_id": "status/time", "package": "com.android.systemui"},
+                {"text": "5KB/s", "resource_id": "status/network", "package": "com.android.systemui"},
+            ],
+        ],
+        current_activities=["com.android.settings/.Settings", "com.android.settings/.Settings"],
+    )
+    executor = _executor(analyzer, ui=ui, collector=collector)
+
+    # Step 1：模拟返回后页面内容不变、只有焦点和节点坐标变化。
+    with pytest.raises(AIRecoveryError, match="Repeated recovery action"):
+        executor.run_step(
+            name="焦点变化重复返回熔断",
+            action=lambda: (_ for _ in ()).throw(RuntimeError("wrong page")),
+            verify=lambda: False,
+            back_retries_action=False,
+        )
+
+    # Step 2：确认不稳定的焦点与坐标没有放过重复返回。
+    assert ui.back_calls == 1
+
+
 def test_same_navigation_label_on_different_pages_is_allowed():
     """验证不同页面的同名入口可以各点击一次。"""
     analyzer = FakeAnalyzer(
@@ -443,6 +507,354 @@ def test_same_navigation_label_on_different_pages_is_allowed():
 
     # Step 2：确认相同文字在不同页面可分别点击。
     assert ui.clicked_texts == ["更多", "更多"]
+
+
+def test_visited_entry_is_rejected_after_returning_to_parent(tmp_path):
+    """验证返回父页面后已进入过的入口被拒绝且不再点击。"""
+    analyzer = FakeAnalyzer(
+        _analysis(RecoveryAction.NAVIGATE, target_text="我的设备"),
+        _analysis(RecoveryAction.BACK),
+        _analysis(RecoveryAction.NAVIGATE, target_text="我的设备"),
+    )
+    ui = FakeUI()
+    collector = FakeContextCollector(ui_texts=[
+        ["Settings", "我的设备", "系统"], ["我的设备", "设备名称"], ["Settings", "我的设备", "系统"],
+    ])
+    log_path = tmp_path / "navigation.jsonl"
+    executor = _executor(analyzer, ui=ui, collector=collector, max_steps=4, trace_path=log_path)
+
+    # Step 1：模拟进入错误分支、返回父页面，再收到同一入口建议。
+    with pytest.raises(AIRecoveryError, match="target already explored"):
+        executor.run_step(
+            name="拒绝重复分支", action=lambda: (_ for _ in ()).throw(RuntimeError("target missing")),
+            verify=lambda: False, back_retries_action=False,
+        )
+
+    # Step 2：确认候选过滤、路径出栈和执行前拒绝都生效。
+    parent_context = analyzer.calls[2]["context"]
+    assert parent_context["navigation"]["blocked_targets_on_current_page"] == ["我的设备"]
+    assert parent_context["available_navigation_candidates"] == ["Settings", "系统"]
+    assert parent_context["navigation"]["navigation_stack"] == []
+    assert ui.clicked_texts == ["我的设备"]
+    assert ui.back_calls == 1
+    events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert any(event["event"] == "action_rejected" and event["reason"] == "visited_edge" for event in events)
+    assert any(event["event"] == "navigation_edge_added" and event["edge_added"] for event in events)
+
+
+def test_other_entry_on_parent_remains_available():
+    """验证父页面中已探索入口被屏蔽后仍可进入其他入口。"""
+    analyzer = FakeAnalyzer(
+        _analysis(RecoveryAction.NAVIGATE, target_text="我的设备"),
+        _analysis(RecoveryAction.BACK),
+        _analysis(RecoveryAction.NAVIGATE, target_text="系统"),
+    )
+    ui = FakeUI()
+    collector = FakeContextCollector(ui_texts=[
+        ["Settings", "我的设备", "系统"], ["我的设备", "设备名称"], ["Settings", "我的设备", "系统"],
+    ])
+    executor = _executor(analyzer, ui=ui, collector=collector, max_steps=3)
+
+    # Step 1：进入旧分支并返回，再选择父页面中未探索的系统入口。
+    executor.run_step(
+        name="选择其他分支", action=lambda: (_ for _ in ()).throw(RuntimeError("target missing")),
+        verify=lambda: ui.clicked_texts[-1:] == ["系统"], back_retries_action=False,
+    )
+
+    # Step 2：确认新入口确实被点击。
+    assert ui.clicked_texts == ["我的设备", "系统"]
+    assert analyzer.calls[2]["context"]["navigation"]["blocked_targets_on_current_page"] == ["我的设备"]
+
+
+def test_unchanged_scroll_marks_child_branch_exhausted():
+    """验证子页面滚动后无变化时明确提示返回父页面。"""
+    analyzer = FakeAnalyzer(
+        _analysis(RecoveryAction.NAVIGATE, target_text="我的设备"),
+        _analysis(RecoveryAction.SCROLL, confidence=0.6),
+        _analysis(RecoveryAction.BACK),
+    )
+    analyzer.results[1].scroll_direction = "down"
+    child_elements = [{"text": "", "content_desc": "", "resource_id": "device/list",
+                       "clickable": False, "scrollable": True}]
+    collector = FakeContextCollector(
+        ui_texts=[["我的设备"], [], []],
+        ui_elements=[
+            [{"text": "我的设备", "clickable": True, "scrollable": False}],
+            child_elements, child_elements,
+        ],
+    )
+    ui = FakeUI()
+    executor = _executor(analyzer, ui=ui, collector=collector, max_steps=3)
+
+    # Step 1：进入子页面并滚动，但下一次观察到的页面仍完全相同。
+    executor.run_step(
+        name="滚动到边界后返回", action=lambda: (_ for _ in ()).throw(RuntimeError("target missing")),
+        verify=lambda: ui.back_calls == 1, back_retries_action=False,
+    )
+
+    # Step 2：确认上下文标记滚动边界与分支耗尽。
+    navigation = analyzer.calls[2]["context"]["navigation"]
+    assert navigation["scroll_at_boundary"] is True
+    assert navigation["branch_exhausted"] is True
+    assert navigation["navigation_stack"][-1]["target"] == "我的设备"
+
+
+def test_same_label_is_blocked_only_under_its_original_parent():
+    """验证不同父页可分别进入“更多”，同一父页返回后不可重入。"""
+    analyzer = FakeAnalyzer(
+        _analysis(RecoveryAction.NAVIGATE, target_text="更多"),
+        _analysis(RecoveryAction.NAVIGATE, target_text="更多"),
+        _analysis(RecoveryAction.BACK),
+        _analysis(RecoveryAction.NAVIGATE, target_text="更多"),
+    )
+    ui = FakeUI()
+    collector = FakeContextCollector(ui_texts=[
+        ["Page A", "更多"], ["Page B", "更多"], ["Page C"], ["Page B", "更多"],
+    ])
+    executor = _executor(analyzer, ui=ui, collector=collector, max_steps=4)
+
+    # Step 1：先进入两个不同父页的同名入口，再回到第二个父页尝试重入。
+    with pytest.raises(AIRecoveryError, match="target already explored"):
+        executor.run_step(
+            name="同名入口边界", action=lambda: (_ for _ in ()).throw(RuntimeError("target missing")),
+            verify=lambda: False, back_retries_action=False,
+        )
+
+    # Step 2：确认两条不同边已执行，重复的第三次点击被拒绝。
+    assert ui.clicked_texts == ["更多", "更多"]
+    assert analyzer.calls[3]["context"]["navigation"]["blocked_targets_on_current_page"] == ["更多"]
+
+
+def test_content_description_is_navigation_candidate():
+    """验证仅含无障碍描述的可点击节点可成为导航候选。"""
+    analyzer = FakeAnalyzer(_analysis(RecoveryAction.NAVIGATE, target_text="系统设置"))
+    ui = FakeUI()
+    collector = FakeContextCollector(ui_elements=[[
+        {"text": "", "content_desc": "系统设置", "clickable": True, "scrollable": False},
+    ]])
+    executor = _executor(analyzer, ui=ui, collector=collector)
+
+    # Step 1：提供只有 content-desc 的现场并让 AI 选择该入口。
+    executor.run_step(
+        name="无障碍描述导航", action=lambda: (_ for _ in ()).throw(RuntimeError("target missing")),
+        verify=lambda: ui.clicked_texts == ["系统设置"],
+    )
+
+    # Step 2：确认候选来自结构化元素，统一点击方法收到该标签。
+    assert analyzer.calls[0]["context"]["available_navigation_candidates"] == ["系统设置"]
+    assert ui.clicked_texts == ["系统设置"]
+
+
+def test_navigation_fingerprint_ignores_focus_bounds_and_status_bar():
+    """验证焦点、坐标和状态栏文字变化不改变页面指纹。"""
+    def context(focused: bool, bounds: str, time: str) -> dict[str, object]:
+        return {
+            "current_activity": "com.android.settings/.Settings",
+            "ui_elements": [
+                {"text": "系统", "content_desc": "", "resource_id": "settings/system", "package": "com.android.settings",
+                 "clickable": True, "scrollable": False, "focused": focused, "bounds": bounds},
+                {"text": time, "package": "com.android.systemui", "resource_id": "status/time"},
+            ],
+        }
+
+    # Step 1：构造业务元素相同但焦点、坐标和系统时间不同的现场。
+    first = context(False, "[0,0][100,100]", "12:01")
+    second = context(True, "[4,4][104,104]", "12:02")
+
+    # Step 2：确认统一指纹函数仅受稳定的应用页面信息影响。
+    assert build_state_fingerprint(first) == build_state_fingerprint(second)
+
+
+def test_device_state_is_cached_across_context_collections(tmp_path):
+    """验证连续采集只读取一次设备静态状态。"""
+    class CountingTV(FakeTV):
+        calls = 0
+
+        def get_device_state(self) -> DeviceState:
+            self.calls += 1
+            return super().get_device_state()
+
+    dump_path = tmp_path / "window.xml"
+    dump_path.write_text('<hierarchy><node text="系统" clickable="true"/></hierarchy>', encoding="utf-8")
+    tv = CountingTV()
+    collector = FailureContextCollector(tv, FakeUI(dump_path=dump_path))
+
+    # Step 1：连续三轮采集恢复上下文。
+    contexts = [collector.collect(step_name="缓存", error=RuntimeError("missing"), attempt=index)
+                for index in range(1, 4)]
+
+    # Step 2：确认设备状态复用且每轮 UI 信息仍可用。
+    assert tv.calls == 1
+    assert all(context["device_state"]["serial"] == "fake-device" for context in contexts)
+    assert all(context["ui_texts"] == ["系统"] for context in contexts)
+
+
+def test_adb_evidence_failure_keeps_ui_navigation_available(tmp_path):
+    """验证 ADB 状态读取失败时仍从 UI hierarchy 提供导航候选。"""
+    class FailingTV:
+        def current_activity(self) -> str:
+            raise TimeoutError("activity timeout")
+
+        def get_device_state(self) -> DeviceState:
+            raise TimeoutError("device state timeout")
+
+    dump_path = tmp_path / "window.xml"
+    dump_path.write_text('<hierarchy><node text="系统" clickable="true"/></hierarchy>', encoding="utf-8")
+    ui = FakeUI(dump_path=dump_path, screenshot_error=TimeoutError("screenshot timeout"))
+    collector = FailureContextCollector(FailingTV(), ui)
+    analyzer = FakeAnalyzer(_analysis(RecoveryAction.NAVIGATE, target_text="系统"))
+    executor = _executor(analyzer, ui=ui, collector=collector)
+
+    # Step 1：让 Activity、设备状态和截图均超时，保留 UI hierarchy。
+    executor.run_step(
+        name="ADB 超时继续导航", action=lambda: (_ for _ in ()).throw(RuntimeError("target missing")),
+        verify=lambda: ui.clicked_texts == ["系统"],
+    )
+
+    # Step 2：确认 AI 收到可点击候选并完成导航。
+    context = analyzer.calls[0]["context"]
+    assert context["available_navigation_candidates"] == ["系统"]
+    assert context["ui_texts"] == ["系统"]
+    assert "TimeoutError" in context["current_activity_error"]
+    assert "TimeoutError" in context["device_state_error"]
+    assert "TimeoutError" in context["screenshot_error"]
+
+
+def test_context_keeps_adb_fallback_hierarchy_and_backend(tmp_path):
+    """验证 ADB 降级成功后的 hierarchy 仍可作为 AI 导航证据。"""
+    dump_path = tmp_path / "adb.xml"
+    dump_path.write_text('<hierarchy><node text="系统" clickable="true"/></hierarchy>', encoding="utf-8")
+    recovery = {"error_type": "RemoteDisconnected", "reconnected": True,
+                "u2_retry_used": True, "u2_retry_success": False,
+                "adb_fallback_used": True, "adb_fallback_success": True}
+    ui = SimpleNamespace(
+        dump_ui=lambda: dump_path, last_dump_backend="adb", last_transport_recovery=recovery,
+        take_screenshot=lambda: tmp_path / "screenshot.png",
+    )
+    collector = FailureContextCollector(FakeTV(), ui)
+
+    # Step 1：读取已由驱动降级保存的 ADB hierarchy。
+    context = collector.collect(step_name="ADB 降级", error=RuntimeError("missing"), attempt=1,
+                                include_screenshot=False)
+
+    # Step 2：确认来源、恢复记录与可见元素均进入上下文。
+    assert context["ui_dump_path"] == str(dump_path)
+    assert context["ui_dump_backend"] == "adb"
+    assert context["transport_recovery"] == recovery
+    assert context["ui_texts"] == ["系统"]
+    assert context["ui_elements"][0]["clickable"] is True
+    assert context["screenshot_path"] is None
+
+
+def test_transport_recovery_trace_does_not_consume_ai_step(tmp_path):
+    """验证驱动层恢复只写追踪事件，不额外消耗 AI 步数。"""
+    analyzer = FakeAnalyzer(_analysis(RecoveryAction.RETRY))
+    collector = FakeContextCollector(ui_texts=[["系统"]])
+    original_collect = collector.collect
+
+    def collect(**kwargs: object) -> dict[str, object]:
+        context = original_collect(**kwargs)
+        context["ui_dump_backend"] = "adb"
+        context["transport_recovery"] = {
+            "error_type": "RemoteDisconnected", "reconnected": True,
+            "u2_retry_success": False, "adb_fallback_used": True, "adb_fallback_success": True,
+        }
+        return context
+
+    collector.collect = collect
+    log_path = tmp_path / "transport.jsonl"
+    executor = _executor(analyzer, collector=collector, trace_path=log_path)
+    calls = 0
+
+    def action() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("missing")
+        return "done"
+
+    # Step 1：模拟一次底层 ADB 降级后由 AI 正常重试业务动作。
+    assert executor.run_step(name="通信恢复", action=action) == "done"
+
+    # Step 2：确认通信恢复单独记日志，AI 仅决策一次。
+    events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    transport = next(event for event in events if event["event"] == "transport_recovery")
+    assert transport["uiautomator_reconnect"] is True
+    assert transport["adb_fallback_success"] is True
+    assert sum(event["event"] == "ai_decision" for event in events) == 1
+    assert next(event for event in events if event["event"] == "step_completed")["recovery_attempts"] == 1
+
+
+def test_exhausted_transport_stops_before_ai_analysis(tmp_path):
+    """验证所有 hierarchy 后端失败时直接报告设备通信故障。"""
+    analyzer = FakeAnalyzer()
+    collector = FakeContextCollector()
+
+    def collect(**_kwargs: object) -> dict[str, object]:
+        return {
+            "current_activity": "com.android.settings/.SubSettings", "ui_elements": [], "ui_texts": [],
+            "transport_unavailable": True,
+            "ui_dump_error": "DeviceTransportError: transport unavailable",
+            "transport_recovery": {
+                "error_type": "RemoteDisconnected", "reconnected": True,
+                "u2_retry_success": False, "adb_fallback_used": True, "adb_fallback_success": False,
+            },
+        }
+
+    collector.collect = collect
+    log_path = tmp_path / "transport_failed.jsonl"
+    executor = _executor(analyzer, collector=collector, trace_path=log_path)
+
+    # Step 1：模拟驱动重连和 ADB 降级均未取得 hierarchy。
+    with pytest.raises(DeviceTransportError, match="Device transport unavailable"):
+        executor.run_step(name="通信全部失败", action=lambda: (_ for _ in ()).throw(RuntimeError("missing")))
+
+    # Step 2：确认 AI 未被调用，日志将根因标为设备通信。
+    events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert analyzer.calls == []
+    assert any(event["event"] == "transport_recovery" for event in events)
+    assert any(event["event"] == "step_failed" and event["failure_category"] == "device_transport"
+               for event in events)
+
+
+def test_initial_transport_error_bypasses_ai_recovery():
+    """验证测试动作自身的设备通信故障也不会交给 AI 分析。"""
+    analyzer = FakeAnalyzer()
+    collector = FakeContextCollector()
+    executor = _executor(analyzer, collector=collector)
+
+    # Step 1：让初始设备动作直接报告通信故障。
+    with pytest.raises(DeviceTransportError, match="transport unavailable"):
+        executor.run_step(
+            name="点击通信故障",
+            action=lambda: (_ for _ in ()).throw(DeviceTransportError("Device UI transport unavailable")),
+        )
+
+    # Step 2：确认没有采集业务失败现场，也没有调用 AI。
+    assert collector.calls == []
+    assert analyzer.calls == []
+
+
+def test_intermediate_recovery_skips_screenshot(tmp_path):
+    """验证首次失败及最终失败截图，中间恢复轮次不截图。"""
+    dump_path = tmp_path / "window.xml"
+    dump_path.write_text('<hierarchy><node text="系统" clickable="true"/></hierarchy>', encoding="utf-8")
+    ui = FakeUI(dump_path=dump_path)
+    collector = FailureContextCollector(FakeTV(), ui)
+    analyzer = FakeAnalyzer(_analysis(RecoveryAction.BACK), _analysis(RecoveryAction.HUMAN_INTERVENTION))
+    executor = _executor(analyzer, ui=ui, collector=collector, max_steps=2)
+
+    # Step 1：首次失败后返回一次，再进入最终人工介入状态。
+    with pytest.raises(AIRecoveryError):
+        executor.run_step(
+            name="截图策略", action=lambda: (_ for _ in ()).throw(RuntimeError("missing")),
+            verify=lambda: False, back_retries_action=False,
+        )
+
+    # Step 2：确认中间一轮无截图，最终失败另存截图证据。
+    assert analyzer.calls[0]["context"]["screenshot_path"] is not None
+    assert analyzer.calls[1]["context"]["screenshot_path"] is None
+    assert ui.screenshot_calls == 2
 
 
 def test_low_confidence_navigation_does_not_click():
@@ -480,6 +892,7 @@ def test_context_uses_visible_elements_without_sending_full_xml(tmp_path):
     assert context["ui_hierarchy"] is None
     assert context["ui_texts"] == ["系统"]
     assert context["ui_elements"][0]["resource_id"] == "settings/system"
+    assert context["ui_elements"][0]["package"] == ""
     assert context["ui_dump_path"] == str(dump_path)
 
 
@@ -508,6 +921,7 @@ def test_executor_writes_utf8_decision_and_action_trace(tmp_path):
     assert "step_completed" in events
     assert decision["reason"] == "Fake evidence based decision"
     assert decision["decision_steps"] == ["现场显示目标缺失", "当前动作可以安全重试"]
+    assert decision["analysis_duration_ms"] >= 0
     assert decision["suggested_action"] == "retry"
     assert any(entry.get("action") == "retry" for entry in entries if entry["event"] == "action_started")
     assert entries[0]["step"] == "中文路径日志"

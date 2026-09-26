@@ -6,6 +6,7 @@ from collections.abc import Callable
 from hashlib import sha256
 import json
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
@@ -13,9 +14,33 @@ from ai.context import FailureContextCollector
 from ai.recovery import RecoveryManager
 from ai.trace import AITraceLogger
 from devices.tv import AndroidTV
-from devices.ui import UIDriver
+from devices.ui import DeviceTransportError, UIDriver
 from models.ai_result import AIAnalysisResult, RecoveryAction
 from models.recovery_result import RecoveryStatus
+
+
+def _application_elements(context: dict[str, Any]) -> list[dict[str, Any]]:
+    """只保留当前应用节点，排除系统状态栏的动态内容。"""
+    activity = context.get("current_activity") or ""
+    app_package = activity.split("/", maxsplit=1)[0]
+    return [
+        element for element in context.get("ui_elements", [])
+        if element.get("package") != "com.android.systemui"
+        and (not app_package or not element.get("package") or element.get("package") == app_package)
+    ]
+
+
+def build_state_fingerprint(context: dict[str, Any]) -> str:
+    """用稳定的应用页面字段生成导航及动作熔断共用的指纹。"""
+    elements = [
+        {key: element.get(key) for key in ("text", "content_desc", "resource_id", "clickable", "scrollable")}
+        for element in _application_elements(context)
+    ]
+    elements.sort(key=lambda element: json.dumps(element, ensure_ascii=False, sort_keys=True))
+    state = {"current_activity": context.get("current_activity") or "", "elements": elements}
+    if not state["current_activity"] and not elements:
+        return "unknown"
+    return sha256(json.dumps(state, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
 
 class AIRecoveryError(RuntimeError):
@@ -100,13 +125,26 @@ class AIExecutor:
         latest_result: Any = None
         recovery_attempts = 0
         navigation_safety_error: str | None = None
+        ui_evidence_error: str | None = None
         action_history: list[dict[str, str]] = []
         observed_states: list[dict[str, Any]] = []
         starting_state: dict[str, Any] | None = None
+        visited_edges: set[tuple[str, str]] = set()
+        navigation_stack: list[dict[str, str]] = []
+        current_state_fingerprint = "unknown"
+        pending_back_state: str | None = None
+        pending_scroll_state: str | None = None
         run_id = uuid4().hex
 
         def trace(event: str, **details: Any) -> None:
-            self.trace_logger.record(run_id=run_id, step_name=name, event=event, **details)
+            self.trace_logger.record(
+                run_id=run_id, step_name=name, event=event,
+                state_fingerprint=current_state_fingerprint,
+                blocked_targets=sorted(target for state, target in visited_edges if state == current_state_fingerprint),
+                visited_edges_count=len(visited_edges),
+                navigation_stack=list(navigation_stack),
+                **details,
+            )
 
         trace(
             "step_started",
@@ -147,9 +185,21 @@ class AIExecutor:
             latest_error = exc
 
         original_error = latest_error or RuntimeError("Step failed without an exception")
+        if isinstance(original_error, DeviceTransportError):
+            trace("step_failed", reason=str(original_error), failure_category="device_transport",
+                  recovery_attempts=0, log_path=str(self.trace_logger.path))
+            raise original_error
+
+        def capture_final_screenshot() -> None:
+            if latest_context is None:
+                return
+            try:
+                latest_context["final_screenshot_path"] = str(self.ui.take_screenshot())
+            except Exception as exc:
+                latest_context["final_screenshot_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
 
         def decide_action(attempt: int, previous_errors: list[str]) -> RecoveryAction:
-            nonlocal latest_analysis, latest_context, starting_state
+            nonlocal latest_analysis, latest_context, starting_state, current_state_fingerprint, pending_back_state, pending_scroll_state, navigation_safety_error, ui_evidence_error
             if navigation_safety_error is not None:
                 return RecoveryAction.HUMAN_INTERVENTION
             current_error = latest_error or original_error
@@ -158,7 +208,56 @@ class AIExecutor:
                 error=current_error,
                 attempt=attempt + 1,
                 previous_errors=previous_errors,
+                include_screenshot=attempt == 0,
             )
+            current_state_fingerprint = build_state_fingerprint(latest_context)
+            transport_recovery = latest_context.get("transport_recovery")
+            if transport_recovery:
+                trace(
+                    "transport_recovery", attempt=attempt + 1,
+                    error_type=transport_recovery.get("error_type"),
+                    uiautomator_reconnect=transport_recovery.get("reconnected", False),
+                    uiautomator_retry_success=transport_recovery.get("u2_retry_success", False),
+                    adb_fallback_used=transport_recovery.get("adb_fallback_used", False),
+                    adb_fallback_success=transport_recovery.get("adb_fallback_success", False),
+                    ui_dump_backend=latest_context.get("ui_dump_backend"),
+                )
+            if latest_context.get("transport_unavailable"):
+                raise DeviceTransportError(
+                    "Device transport unavailable after uiautomator2 reconnect and ADB fallback"
+                )
+            if latest_context.get("ui_dump_error") or latest_context.get("ui_hierarchy_error"):
+                ui_evidence_error = (
+                    f"UI hierarchy evidence unavailable: "
+                    f"{latest_context.get('ui_dump_error') or latest_context.get('ui_hierarchy_error')}"
+                )
+                trace("ui_evidence_unavailable", attempt=attempt + 1, reason=ui_evidence_error)
+                return RecoveryAction.HUMAN_INTERVENTION
+            scroll_at_boundary = pending_scroll_state is not None and current_state_fingerprint == pending_scroll_state
+            pending_scroll_state = None
+            if pending_back_state is not None:
+                if (navigation_stack and current_state_fingerprint == navigation_stack[-1]["parent_state"]
+                        and current_state_fingerprint != pending_back_state):
+                    navigation_stack.pop()
+                pending_back_state = None
+            blocked_targets = sorted(target for state, target in visited_edges if state == current_state_fingerprint)
+            candidates = list(dict.fromkeys(
+                label
+                for element in _application_elements(latest_context) if element.get("clickable")
+                for label in (element.get("text"), element.get("content_desc")) if label and label not in blocked_targets
+            ))
+            latest_context["available_navigation_candidates"] = candidates
+            latest_context["navigation"] = {
+                "current_state_id": current_state_fingerprint,
+                "visited_edges": [
+                    {"from_state": state, "target": target} for state, target in sorted(visited_edges)
+                ],
+                "blocked_targets_on_current_page": blocked_targets,
+                "navigation_stack": [dict(edge) for edge in navigation_stack],
+                "scroll_at_boundary": scroll_at_boundary,
+                "branch_exhausted": bool(navigation_stack and not candidates
+                                         and (scroll_at_boundary or not latest_context.get("scrollable_nodes"))),
+            }
             latest_context["goal"] = goal or name
             latest_context["previous_actions"] = list(action_history)
             current_state = {
@@ -170,21 +269,25 @@ class AIExecutor:
             latest_context["starting_state"] = starting_state
             observed_states.append(current_state)
             latest_context["observed_states"] = list(observed_states)
+            analysis_started = perf_counter()
             try:
                 latest_analysis = self.analyzer.analyze(
                     failure=f"{type(current_error).__name__}: {current_error}",
                     context=latest_context,
                 )
             except Exception as exc:
+                analysis_duration_ms = round((perf_counter() - analysis_started) * 1000, 2)
                 trace(
                     "ai_analysis_failed",
                     attempt=attempt + 1,
+                    analysis_duration_ms=analysis_duration_ms,
                     current_activity=latest_context.get("current_activity"),
                     visible_ui_texts=latest_context.get("ui_texts", []),
                     error_type=type(exc).__name__,
                     error=str(exc)[:1000],
                 )
                 raise
+            analysis_duration_ms = round((perf_counter() - analysis_started) * 1000, 2)
             # 返回键只关闭当前层级，风险低于点击菜单；仍要求模型明确选择 back。
             minimum_confidence = self.action_confidence.get(
                 latest_analysis.suggested_action, self.min_recovery_confidence
@@ -198,6 +301,7 @@ class AIExecutor:
                 f"建议={latest_analysis.suggested_action.value}；"
                 f"目标项={latest_analysis.target_text}；"
                 f"置信度={latest_analysis.confidence:.2f}；"
+                f"请求耗时={analysis_duration_ms:.2f}ms；"
                 f"执行={'是' if accepted else '否（置信度不足）'}",
                 flush=True,
             )
@@ -206,11 +310,14 @@ class AIExecutor:
                 attempt=attempt + 1,
                 failure=f"{type(current_error).__name__}: {current_error}"[:1000],
                 current_activity=latest_context.get("current_activity"),
+                analysis_duration_ms=analysis_duration_ms,
                 goal=goal or name,
                 starting_state=starting_state,
                 visible_ui_texts=latest_context.get("ui_texts", []),
                 scrollable_nodes=latest_context.get("scrollable_nodes", []),
                 ui_dump_path=latest_context.get("ui_dump_path"),
+                ui_dump_backend=latest_context.get("ui_dump_backend"),
+                ui_dump_error=latest_context.get("ui_dump_error"),
                 previous_actions=list(action_history),
                 observed_states=list(observed_states),
                 reason=latest_analysis.reason,
@@ -223,6 +330,13 @@ class AIExecutor:
                 confidence_threshold=minimum_confidence,
                 accepted=accepted,
             )
+            if accepted and latest_analysis.suggested_action is RecoveryAction.NAVIGATE:
+                target = latest_analysis.target_text
+                if (current_state_fingerprint, target) in visited_edges:
+                    navigation_safety_error = "target already explored on current page"
+                    trace("action_rejected", action="navigate", target_text=target, from_state=current_state_fingerprint,
+                          reason="visited_edge", detail=navigation_safety_error, edge_added=False)
+                    return RecoveryAction.HUMAN_INTERVENTION
             return latest_analysis.suggested_action if accepted else RecoveryAction.HUMAN_INTERVENTION
 
         def retry_original() -> None:
@@ -233,10 +347,11 @@ class AIExecutor:
             execute(retry_action or action)
 
         def go_back_and_retry() -> None:
-            nonlocal recovery_attempts
+            nonlocal recovery_attempts, pending_back_state
             recovery_attempts += 1
             trace("action_started", action="back")
             self.ui.back()
+            pending_back_state = current_state_fingerprint
             action_history.append({"action": "back"})
             trace("action_completed", action="back")
             if back_retries_action:
@@ -265,41 +380,49 @@ class AIExecutor:
         def navigate_to_target() -> None:
             nonlocal recovery_attempts, navigation_safety_error
             target = latest_analysis.target_text if latest_analysis is not None else None
-            visible_texts = (latest_context or {}).get("ui_texts", [])
-            if not target or target not in visible_texts:
-                navigation_safety_error = "AI navigation target must be visible in the current UI"
-                trace("action_rejected", action="navigate", target_text=target, reason=navigation_safety_error)
+            edge = (current_state_fingerprint, target)
+            if edge in visited_edges:
+                navigation_safety_error = "target already explored on current page"
+                trace("action_rejected", action="navigate", target_text=target, from_state=current_state_fingerprint,
+                      reason="visited_edge", detail=navigation_safety_error, edge_added=False)
+                raise RuntimeError(navigation_safety_error)
+            if not target or target not in (latest_context or {}).get("available_navigation_candidates", []):
+                navigation_safety_error = "AI navigation target must be a visible clickable candidate"
+                trace("action_rejected", action="navigate", target_text=target, from_state=current_state_fingerprint,
+                      reason="target_not_available", detail=navigation_safety_error, edge_added=False)
                 raise RuntimeError(navigation_safety_error)
             recovery_attempts += 1
-            trace("action_started", action="navigate", target_text=target)
+            trace("action_started", action="navigate", target_text=target, from_state=current_state_fingerprint)
             action_history.append({"action": "navigate", "target_text": target})
-            execute(lambda: self.ui.click_text(target, timeout=3))
+            def click_candidate() -> bool:
+                if not self.ui.click_visible_label(target, timeout=3):
+                    raise RuntimeError("Android UI navigation click did not succeed")
+                return True
+
+            execute(click_candidate)
+            visited_edges.add((current_state_fingerprint, target))
+            navigation_stack.append({"parent_state": current_state_fingerprint, "target": target})
+            trace("navigation_edge_added", action="navigate", from_state=current_state_fingerprint,
+                  target=target, edge_added=True)
 
         def scroll_screen() -> None:
-            nonlocal recovery_attempts
+            nonlocal recovery_attempts, pending_scroll_state
             direction = latest_analysis.scroll_direction if latest_analysis is not None else None
             if direction not in {"up", "down"}:
                 raise RuntimeError("AI scroll action requires direction up or down")
             recovery_attempts += 1
             trace("action_started", action="scroll", direction=direction)
             self.ui.scroll(direction)
+            pending_scroll_state = current_state_fingerprint
             action_history.append({"action": "scroll", "direction": direction})
             trace("action_completed", action="scroll", direction=direction)
 
         def action_identity(action: RecoveryAction) -> str:
-            context = latest_context or {}
-            state = {
-                "activity": context.get("current_activity"),
-                "elements": context.get("ui_elements"),
-                "texts": context.get("ui_texts"),
-            }
-            observed = any(state.values())
-            state_hash = sha256(json.dumps(state, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16] if observed else "unknown"
             if action is RecoveryAction.NAVIGATE and latest_analysis is not None:
-                return f"navigate:{latest_analysis.target_text}:{state_hash}"
+                return f"navigate:{latest_analysis.target_text}:{current_state_fingerprint}"
             if action is RecoveryAction.SCROLL and latest_analysis is not None:
-                return f"scroll:{latest_analysis.scroll_direction}:{state_hash}"
-            return f"{action.value}:{state_hash}"
+                return f"scroll:{latest_analysis.scroll_direction}:{current_state_fingerprint}"
+            return f"{action.value}:{current_state_fingerprint}"
 
         handlers: dict[RecoveryAction, Callable[[], None]] = {
             RecoveryAction.RETRY: retry_original,
@@ -318,13 +441,21 @@ class AIExecutor:
                 verify=verify_step,
                 action_identity=action_identity,
                 max_steps=max_recovery_steps,
+                fatal_exceptions=(DeviceTransportError,),
             )
+        except DeviceTransportError as exc:
+            trace("step_failed", reason=str(exc), failure_category="device_transport",
+                  recovery_attempts=recovery_attempts, log_path=str(self.trace_logger.path))
+            raise
         except Exception as exc:
             if latest_analysis is None:
                 reason = f"AI analysis failed: {type(exc).__name__}: {exc}"
             else:
                 reason = f"Recovery decision failed: {type(exc).__name__}: {exc}"
-            trace("step_failed", reason=reason, recovery_attempts=recovery_attempts, log_path=str(self.trace_logger.path))
+            capture_final_screenshot()
+            trace("step_failed", reason=reason, recovery_attempts=recovery_attempts,
+                  final_screenshot_path=(latest_context or {}).get("final_screenshot_path"),
+                  log_path=str(self.trace_logger.path))
             raise AIRecoveryError(
                 step_name=name,
                 original_error=original_error,
@@ -342,7 +473,9 @@ class AIExecutor:
         required_confidence = self.action_confidence.get(
             latest_analysis.suggested_action, self.min_recovery_confidence
         ) if latest_analysis is not None else self.min_recovery_confidence
-        if latest_analysis is not None and latest_analysis.confidence < required_confidence:
+        if ui_evidence_error is not None:
+            reason = f"{ui_evidence_error}; human intervention is required"
+        elif latest_analysis is not None and latest_analysis.confidence < required_confidence:
             reason = (
                 f"AI confidence {latest_analysis.confidence:.2f} is below the required "
                 f"threshold {required_confidence:.2f}; human intervention is required"
@@ -350,15 +483,17 @@ class AIExecutor:
         elif latest_analysis is not None and recovery.status is RecoveryStatus.STOPPED:
             reason = latest_analysis.reason
         elif latest_analysis is not None and recovery.status is RecoveryStatus.NEEDS_HUMAN:
-            reason = f"{latest_analysis.reason}; {recovery.reason}"
+            reason = f"{latest_analysis.reason}; {navigation_safety_error or recovery.reason}; human intervention is required"
         else:
             reason = recovery.reason
 
+        capture_final_screenshot()
         trace(
             "step_failed",
             reason=reason,
             recovery_attempts=recovery.attempts,
             final_action=latest_analysis.suggested_action.value if latest_analysis else None,
+            final_screenshot_path=(latest_context or {}).get("final_screenshot_path"),
             log_path=str(self.trace_logger.path),
         )
         raise AIRecoveryError(
