@@ -89,12 +89,13 @@ class ADBClient:
         """返回当前选定的设备 serial；未指定时沿用 ADB 的设备选择规则。"""
         return self._selected_serial()
 
-    def current_activity(self) -> str | None:
+    def current_activity(self, timeout: float | None = None) -> str | None:
         """读取当前前台 Activity；无法解析时返回 None。"""
-        output = self.run_shell("dumpsys activity activities")
+        output = self.run_shell("dumpsys activity activities", timeout=timeout)
         patterns = (
             r"mResumedActivity:.*?\s(?:u\d+\s+)?([\w.$]+/[\w.$]+)",
             r"topResumedActivity=ActivityRecord\{[^}]*?\s(?:u\d+\s+)?([\w.$]+/[\w.$]+)",
+            r"ResumedActivity:\s*ActivityRecord\{[^}]*?\s(?:u\d+\s+)?([\w.$]+/[\w.$]+)",
         )
         for pattern in patterns:
             match = re.search(pattern, output)
@@ -134,7 +135,7 @@ class ADBClient:
         path.write_bytes(result.stdout)
         return path
 
-    def get_device_state(self) -> DeviceState:
+    def get_device_state(self, include_activity: bool = True) -> DeviceState:
         """收集设备型号、厂商、系统版本和当前 Activity。"""
         serial = self._selected_serial()
 
@@ -148,5 +149,23 @@ class ADBClient:
             model=getprop("ro.product.model"),
             manufacturer=getprop("ro.product.manufacturer"),
             android_version=getprop("ro.build.version.release"),
-            current_activity=self.current_activity(),
+            current_activity=self.current_activity() if include_activity else None,
+        )
+
+    def get_static_device_state(self, timeout: float = 3) -> DeviceState:
+        """以短超时读取可缓存的静态设备属性，不查询动态 Activity。"""
+        serial = self._selected_serial()
+
+        def getprop(name: str) -> str | None:
+            try:
+                return self.run_shell(f"getprop {name}", timeout=timeout) or None
+            except ADBError:
+                return None
+
+        return DeviceState(
+            serial=serial,
+            model=getprop("ro.product.model"),
+            manufacturer=getprop("ro.product.manufacturer"),
+            android_version=getprop("ro.build.version.release"),
+            current_activity=None,
         )

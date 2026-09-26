@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 
 from models.ai_result import RecoveryAction
 from models.recovery_result import RecoveryResult, RecoveryStatus
+from devices.ui import UnknownActionOutcome
 
 
 class RecoveryManager:
@@ -49,6 +50,9 @@ class RecoveryManager:
                 handler()
                 if verify():
                     return RecoveryResult(status=RecoveryStatus.COMPLETED, attempts=attempts, last_action=action, reason="Recovery succeeded", errors=errors)
+            except UnknownActionOutcome as exc:
+                # 写请求断线时不重发；继续采集现场并让下一轮基于新页面决策。
+                errors.append(f"{action.value}: {type(exc).__name__}: {str(exc)[:300]}")
             except fatal_exceptions:
                 raise
             except Exception as exc:

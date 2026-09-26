@@ -4,12 +4,20 @@ from ai.executor import AIRecoveryError
 from flows.settings_flow import SettingsFlow
 
 
-def is_developer_options_page(ui) -> bool:
-    """用同一组页面特征判断是否进入开发者选项。"""
-    return any(
-        ui.exists("text", label, timeout=2)
-        for label in ("开启开发者选项", "USB调试", "USB 调试", "USB debugging")
-    )
+def is_developer_options_context(context) -> bool:
+    """根据已采集的可见文字判断是否进入开发者选项。"""
+    labels = set(context.get("ui_texts", []))
+    return bool(labels & {"开启开发者选项", "USB调试", "USB 调试", "USB debugging"})
+
+
+def verify_developer_options_context(context) -> bool:
+    """记录最后一次 context 校验结果，供测试末尾复核。"""
+    passed = is_developer_options_context(context)
+    _verification_results.append(passed)
+    return passed
+
+
+_verification_results: list[bool] = []
 
 
 @pytest.mark.device
@@ -17,6 +25,7 @@ def is_developer_options_page(ui) -> bool:
 def test_ai_navigates_from_my_device_to_developer_options(ai_executor, tv, ui):
     """验证 AI 能从错误的“我的设备”页面返回设置并找到开发者选项。"""
     settings = SettingsFlow(tv)
+    _verification_results.clear()
 
     # Step 1：打开系统设置并进入“我的设备”页面。
     settings.open_settings()
@@ -32,7 +41,7 @@ def test_ai_navigates_from_my_device_to_developer_options(ai_executor, tv, ui):
             action=lambda: ui.click_text("开发者选项", timeout=3),
             back_retries_action=False,
             max_recovery_steps=10,
-            verify=lambda: is_developer_options_page(ui),
+            verify_context=verify_developer_options_context,
         )
     except AIRecoveryError as error:
         print(
@@ -49,5 +58,5 @@ def test_ai_navigates_from_my_device_to_developer_options(ai_executor, tv, ui):
         raise
 
     # Step 3：确认最终已进入开发者选项页面。
-    assert is_developer_options_page(ui)
+    assert _verification_results and _verification_results[-1]
     print(f"AI 路径日志：{ai_executor.trace_path}")

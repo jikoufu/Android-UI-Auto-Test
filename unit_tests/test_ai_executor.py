@@ -115,6 +115,7 @@ def _analysis(
     action: RecoveryAction,
     confidence: float = 0.9,
     target_text: str | None = None,
+    target_candidate_id: str | None = None,
 ) -> AIAnalysisResult:
     """构造一个最小合法的结构化恢复建议。"""
     return AIAnalysisResult(
@@ -125,6 +126,7 @@ def _analysis(
         evidence=["fake evidence"],
         decision_steps=["现场显示目标缺失", "当前动作可以安全重试"],
         target_text=target_text,
+        target_candidate_id=target_candidate_id,
     )
 
 
@@ -533,7 +535,7 @@ def test_visited_entry_is_rejected_after_returning_to_parent(tmp_path):
     # Step 2：确认候选过滤、路径出栈和执行前拒绝都生效。
     parent_context = analyzer.calls[2]["context"]
     assert parent_context["navigation"]["blocked_targets_on_current_page"] == ["我的设备"]
-    assert parent_context["available_navigation_candidates"] == ["Settings", "系统"]
+    assert [item["label"] for item in parent_context["available_navigation_candidates"]] == ["Settings", "系统"]
     assert parent_context["navigation"]["navigation_stack"] == []
     assert ui.clicked_texts == ["我的设备"]
     assert ui.back_calls == 1
@@ -641,7 +643,7 @@ def test_content_description_is_navigation_candidate():
     )
 
     # Step 2：确认候选来自结构化元素，统一点击方法收到该标签。
-    assert analyzer.calls[0]["context"]["available_navigation_candidates"] == ["系统设置"]
+    assert [item["label"] for item in analyzer.calls[0]["context"]["available_navigation_candidates"]] == ["系统设置"]
     assert ui.clicked_texts == ["系统设置"]
 
 
@@ -713,7 +715,7 @@ def test_adb_evidence_failure_keeps_ui_navigation_available(tmp_path):
 
     # Step 2：确认 AI 收到可点击候选并完成导航。
     context = analyzer.calls[0]["context"]
-    assert context["available_navigation_candidates"] == ["系统"]
+    assert [item["label"] for item in context["available_navigation_candidates"]] == ["系统"]
     assert context["ui_texts"] == ["系统"]
     assert "TimeoutError" in context["current_activity_error"]
     assert "TimeoutError" in context["device_state_error"]
@@ -744,6 +746,168 @@ def test_context_keeps_adb_fallback_hierarchy_and_backend(tmp_path):
     assert context["ui_texts"] == ["系统"]
     assert context["ui_elements"][0]["clickable"] is True
     assert context["screenshot_path"] is None
+
+
+def test_hierarchy_is_collected_before_adb_helpers_and_survives_timeouts(tmp_path):
+    """验证 hierarchy 优先采集，ADB 辅助信息超时不影响 UI 证据。"""
+    events = []
+    dump_path = tmp_path / "ordered.xml"
+    dump_path.write_text('<hierarchy><node text="系统" clickable="true"/></hierarchy>', encoding="utf-8")
+
+    class OrderedUI(FakeUI):
+        def dump_ui(self):
+            events.append("hierarchy")
+            return dump_path
+
+    class SlowTV:
+        def current_activity(self, **_kwargs):
+            events.append("activity")
+            raise TimeoutError("slow activity")
+
+        def get_static_device_state(self, **_kwargs):
+            events.append("device")
+            raise TimeoutError("slow props")
+
+    # Step 1：模拟 Activity 与静态属性超时，但 hierarchy 可正常读取。
+    context = FailureContextCollector(SlowTV(), OrderedUI()).collect(
+        step_name="采集顺序", error=RuntimeError("missing"), attempt=1, include_screenshot=False,
+    )
+
+    # Step 2：确认 hierarchy 先完成，超时仅记录为辅助证据错误。
+    assert events == ["hierarchy", "activity", "device"]
+    assert context["ui_texts"] == ["系统"]
+    assert "TimeoutError" in context["current_activity_error"]
+    assert "TimeoutError" in context["device_state_error"]
+
+
+def test_static_device_cache_does_not_freeze_current_activity(tmp_path):
+    """验证设备静态缓存不包含动态 Activity，连续采集可更新页面。"""
+    dump_path = tmp_path / "activity.xml"
+    dump_path.write_text("<hierarchy />", encoding="utf-8")
+
+    class ChangingTV(FakeTV):
+        activities = iter(["ActivityA", "ActivityB"])
+        calls = 0
+
+        def current_activity(self, **_kwargs):
+            return next(self.activities)
+
+        def get_static_device_state(self, **_kwargs):
+            self.calls += 1
+            return DeviceState(serial="fake-device", model="Fake Android", current_activity="stale")
+
+    tv = ChangingTV()
+    collector = FailureContextCollector(tv, FakeUI(dump_path=dump_path))
+
+    # Step 1：在同一采集器中读取两个不同页面和同一组静态设备属性。
+    first = collector.collect(step_name="动态页面", error=RuntimeError("x"), attempt=1, include_screenshot=False)
+    second = collector.collect(step_name="动态页面", error=RuntimeError("x"), attempt=2, include_screenshot=False)
+
+    # Step 2：确认页面更新，静态信息只查询一次且不含旧 Activity。
+    assert first["current_activity"] == "ActivityA"
+    assert second["current_activity"] == "ActivityB"
+    assert "current_activity" not in second["device_state"]
+    assert tv.calls == 1
+
+
+def test_verify_context_reuses_observation_without_exists_or_second_dump(tmp_path):
+    """验证 verify_context 与 AI 分析复用一次 hierarchy observation。"""
+    dump_path = tmp_path / "verify.xml"
+    dump_path.write_text('<hierarchy><node text="开发者选项" /></hierarchy>', encoding="utf-8")
+    ui = FakeUI(dump_path=dump_path)
+    collector = FailureContextCollector(FakeTV(), ui)
+    analyzer = FakeAnalyzer(_analysis(RecoveryAction.STOP))
+    executor = _executor(analyzer, ui=ui, collector=collector)
+    checked = []
+
+    # Step 1：让初始校验失败，并把同一份现场交给 AI 做停止决策。
+    with pytest.raises(AIRecoveryError):
+        executor.run_step(
+            name="复用现场", action=lambda: "done",
+            verify_context=lambda context: checked.append(context) or False,
+        )
+
+    # Step 2：确认验证和 AI 使用同一对象，且本轮只 dump 一次。
+    assert len(checked) == 1
+    assert analyzer.calls[0]["context"] is checked[0]
+    assert ui.dump_calls == 1
+    assert checked[0]["verify_duration_ms"] >= 0
+    assert checked[0]["ui_dump_duration_ms"] >= 0
+
+
+def test_duplicate_labels_keep_distinct_candidate_ids_and_stable_keys():
+    """验证同名但 resource-id 不同的入口保留独立候选身份。"""
+    elements = [
+        {"text": "更多", "resource_id": "settings/more_a", "class": "android.widget.TextView",
+         "clickable": True, "enabled": True},
+        {"text": "更多", "resource_id": "settings/more_b", "class": "android.widget.TextView",
+         "clickable": True, "enabled": True},
+    ]
+
+    # Step 1：从同一页面的两个同名可点击节点生成候选。
+    candidates = FailureContextCollector._navigation_candidates(elements)
+
+    # Step 2：确认快照 ID 和稳定元素键均能区分两个入口。
+    assert [item["label"] for item in candidates] == ["更多", "更多"]
+    assert candidates[0]["candidate_id"] != candidates[1]["candidate_id"]
+    assert candidates[0]["stable_key"] != candidates[1]["stable_key"]
+
+
+def test_visited_edges_block_only_matching_stable_candidate():
+    """验证同名入口中已访问的 stable key 被屏蔽而另一入口仍可走。"""
+    analyzer = FakeAnalyzer(
+        _analysis(RecoveryAction.NAVIGATE, target_text="更多", target_candidate_id="e1"),
+        _analysis(RecoveryAction.NAVIGATE, target_text="更多", target_candidate_id="e2"),
+    )
+    ui = FakeUI()
+    nodes = [
+        {"text": "更多", "resource_id": "settings/more_a", "class": "android.widget.TextView",
+         "clickable": True, "enabled": True},
+        {"text": "更多", "resource_id": "settings/more_b", "class": "android.widget.TextView",
+         "clickable": True, "enabled": True},
+    ]
+    collector = FakeContextCollector(ui_texts=[["更多", "更多"], ["更多", "更多"]],
+                                     ui_elements=[nodes, nodes])
+    executor = _executor(analyzer, ui=ui, collector=collector, max_steps=2)
+
+    # Step 1：先选 e1，再从同一页面选择另一个同名候选 e2。
+    result = executor.run_step(
+        name="同名稳定入口", action=lambda: (_ for _ in ()).throw(RuntimeError("target missing")),
+        verify=lambda: len(ui.clicked_texts) == 2,
+    )
+
+    # Step 2：确认访问 e1 后仍保留 e2，且两次候选顺序可区分。
+    assert result is True
+    second_context = analyzer.calls[1]["context"]
+    assert [item["candidate_id"] for item in second_context["available_navigation_candidates"]] == ["e2"]
+    assert second_context["navigation"]["blocked_stable_keys_on_current_page"] == ["id:settings/more_a"]
+
+
+def test_checkable_elements_are_excluded_from_navigation_candidates():
+    """验证 Switch 等可切换控件不会被当作页面导航入口。"""
+    xml = '<hierarchy><node text="USB 调试" clickable="true" checkable="true"/></hierarchy>'
+
+    # Step 1：解析现场中的可点击且可切换控件。
+    elements, _ = FailureContextCollector._visible_elements(xml)
+    candidates = FailureContextCollector._navigation_candidates(elements)
+
+    # Step 2：确认控件属性保留，但导航候选为空。
+    assert elements[0]["checkable"] is True
+    assert candidates == []
+
+
+def test_vendor_package_elements_remain_in_application_context():
+    """验证 Activity 包名不同的厂商设置节点不会被误过滤。"""
+    from ai.executor import _application_elements
+
+    # Step 1：构造 TCL Activity 中由 Android 设置包提供的有效入口。
+    context = {"current_activity": "com.tcl.settings/.Settings", "ui_elements": [
+        {"text": "系统", "package": "com.android.settings", "clickable": True},
+        {"text": "时间", "package": "com.android.systemui", "clickable": True},
+    ]}
+
+    # Step 2：确认保留 vendor 子页面内容，同时排除状态栏 overlay。
+    assert [item["text"] for item in _application_elements(context)] == ["系统"]
 
 
 def test_transport_recovery_trace_does_not_consume_ai_step(tmp_path):

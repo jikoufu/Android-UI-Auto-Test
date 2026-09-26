@@ -31,6 +31,10 @@ class DeviceTransportError(UIDriverError):
     """设备 UI 通信在有限自愈后仍失败。"""
 
 
+class UnknownActionOutcome(DeviceTransportError):
+    """写操作断线后无法确认设备是否已经执行。"""
+
+
 class UIDriver:
     _SELECTOR_ATTRIBUTES = {
         "text": "text",
@@ -115,6 +119,36 @@ class UIDriver:
         if selector_attribute is None:
             raise ValueError(f"Unsupported UI selector attribute: {attribute}")
         return self.connect()(**{selector_attribute: value})
+
+    def _run_read_operation(self, operation: Any, name: str) -> Any:
+        """只读调用遇到传输错误时重连并最多重试一次。"""
+        try:
+            return operation()
+        except Exception as first_error:
+            if not self._is_transport_error(first_error):
+                raise self._operation_error(first_error, name) from first_error
+            try:
+                self.reconnect()
+                return operation()
+            except Exception as retry_error:
+                raise DeviceTransportError(
+                    f"Device UI transport unavailable during {name} after reconnect ({type(retry_error).__name__})"
+                ) from retry_error
+
+    def _run_write_operation(self, operation: Any, name: str) -> Any:
+        """写调用断线时只重连，不重发，避免重复执行未知结果的动作。"""
+        try:
+            return operation()
+        except Exception as error:
+            if not self._is_transport_error(error):
+                raise self._operation_error(error, name) from error
+            try:
+                self.reconnect()
+            except Exception:
+                pass
+            raise UnknownActionOutcome(
+                f"UI action outcome is unknown after transport disconnect during {name}"
+            ) from error
 
     def _dump_ui_with_u2(self) -> Path:
         """执行一次 uiautomator2 hierarchy 采集并保存 XML。"""
@@ -211,12 +245,12 @@ class UIDriver:
         """检查元素是否存在；timeout 为等待秒数，默认立即返回。"""
         if timeout < 0:
             raise ValueError("timeout must be non-negative")
-        try:
-            return bool(self._selector(attribute, value).exists(timeout=timeout))
-        except (ValueError, UIDriverError):
-            raise
-        except Exception as exc:
-            raise self._operation_error(exc, "check element") from exc
+        selector_attribute = self._SELECTOR_ATTRIBUTES.get(attribute)
+        if selector_attribute is None:
+            raise ValueError(f"Unsupported UI selector attribute: {attribute}")
+        return bool(self._run_read_operation(
+            lambda: self.connect()(**{selector_attribute: value}).exists(timeout=timeout), "check element"
+        ))
 
     def find_element(
         self,
@@ -230,28 +264,39 @@ class UIDriver:
             return self._find_in_saved_xml(attribute, value, xml_path)
         if timeout < 0:
             raise ValueError("timeout must be non-negative")
-        try:
-            selector = self._selector(attribute, value)
-            if not selector.exists(timeout=timeout):
-                return None
-            info = selector.info
-        except (ValueError, UIDriverError):
-            raise
-        except Exception as exc:
-            raise self._operation_error(exc, "find element") from exc
+        selector_attribute = self._SELECTOR_ATTRIBUTES.get(attribute)
+        if selector_attribute is None:
+            raise ValueError(f"Unsupported UI selector attribute: {attribute}")
+        def find() -> Any:
+            selector = self.connect()(**{selector_attribute: value})
+            return selector.info if selector.exists(timeout=timeout) else None
+        info = self._run_read_operation(find, "find element")
         return dict(info) if isinstance(info, dict) else None
 
     def click(self, attribute: str, value: str, timeout: float = 10) -> bool:
         """等待指定元素出现并点击，成功后返回 True。"""
         if timeout < 0:
             raise ValueError("timeout must be non-negative")
-        try:
-            self._selector(attribute, value).click(timeout=timeout)
-        except (ValueError, UIDriverError):
-            raise
-        except Exception as exc:
-            raise self._operation_error(exc, "click element") from exc
+        selector_attribute = self._SELECTOR_ATTRIBUTES.get(attribute)
+        if selector_attribute is None:
+            raise ValueError(f"Unsupported UI selector attribute: {attribute}")
+        self._run_write_operation(
+            lambda: self.connect()(**{selector_attribute: value}).click(timeout=timeout), "click element"
+        )
         return True
+
+    def click_candidate(self, candidate: dict[str, Any], timeout: float = 3) -> bool:
+        """按候选的稳定定位字段优先级执行一次点击。"""
+        if candidate.get("role") != "navigation":
+            raise UIDriverError("Only navigation candidates can be clicked by AI recovery")
+        for attribute, value in (
+            ("resourceId", candidate.get("resource_id")),
+            ("description", candidate.get("content_desc")),
+            ("text", candidate.get("text") or candidate.get("label")),
+        ):
+            if value and self.exists(attribute, value):
+                return self.click(attribute, value, timeout=timeout)
+        raise UIDriverError("Navigation candidate no longer exists in the current UI")
 
     def click_text(self, text: str, timeout: float = 10) -> bool:
         """按界面上的完整文字查找并点击元素。"""
@@ -268,12 +313,12 @@ class UIDriver:
         """等待指定元素出现；超时后返回 False。"""
         if timeout < 0:
             raise ValueError("timeout must be non-negative")
-        try:
-            return bool(self._selector(attribute, value).wait(timeout=timeout))
-        except (ValueError, UIDriverError):
-            raise
-        except Exception as exc:
-            raise self._operation_error(exc, "wait for element") from exc
+        selector_attribute = self._SELECTOR_ATTRIBUTES.get(attribute)
+        if selector_attribute is None:
+            raise ValueError(f"Unsupported UI selector attribute: {attribute}")
+        return bool(self._run_read_operation(
+            lambda: self.connect()(**{selector_attribute: value}).wait(timeout=timeout), "wait for element"
+        ))
 
     def wait_exists(self, attribute: str, value: str, timeout: float = 10) -> bool:
         """wait 的兼容别名，等待元素出现并返回是否找到。"""
@@ -283,10 +328,7 @@ class UIDriver:
         """通过 uiautomator2 发送 Android 按键名称，例如 back 或 home。"""
         if not key.strip():
             raise ValueError("key must not be empty")
-        try:
-            self.connect().press(key.strip().lower())
-        except Exception as exc:
-            raise self._operation_error(exc, "press key") from exc
+        self._run_write_operation(lambda: self.connect().press(key.strip().lower()), "press key")
 
     def back(self) -> None:
         """发送 Android 返回键。"""
@@ -296,12 +338,9 @@ class UIDriver:
         """在当前界面纵向滚动一屏。"""
         if direction not in {"up", "down"}:
             raise ValueError("direction must be 'up' or 'down'")
-        try:
-            # 手指向上滑动时列表内容向下，反之亦然。
-            gesture = "up" if direction == "down" else "down"
-            self.connect().swipe_ext(gesture, scale=0.7)
-        except Exception as exc:
-            raise self._operation_error(exc, "scroll") from exc
+        # 手指向上滑动时列表内容向下，反之亦然。
+        gesture = "up" if direction == "down" else "down"
+        self._run_write_operation(lambda: self.connect().swipe_ext(gesture, scale=0.7), "scroll")
 
     def home(self) -> None:
         """发送 Android 主屏键。"""

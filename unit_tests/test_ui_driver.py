@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from ai.tools.ui_tool import ui_tools
-from devices.ui import DeviceTransportError, UIDriver, UIDriverError
+from devices.ui import DeviceTransportError, UIDriver, UIDriverError, UnknownActionOutcome
 
 
 class FakeSelector:
@@ -292,8 +292,102 @@ def test_click_transport_failure_is_not_reported_as_business_error(tmp_path):
     driver = UIDriver(FakeADB(tmp_path), device=DisconnectedDevice())
 
     # Step 1：模拟点击过程中 u2 HTTP 连接被设备端关闭。
-    with pytest.raises(DeviceTransportError, match="during click element"):
+    with pytest.raises(UnknownActionOutcome, match="outcome is unknown"):
         driver.click_text("系统")
+
+
+def test_exists_reconnects_once_after_transport_failure(tmp_path, monkeypatch):
+    """验证只读 exists 断线后重连并安全重试一次。"""
+    class BrokenSelector(FakeSelector):
+        def exists(self, timeout=0):
+            raise RemoteDisconnected("remote closed")
+
+    class BrokenDevice(FakeDevice):
+        def __call__(self, **_selector):
+            return BrokenSelector()
+
+    first = BrokenDevice()
+    second = FakeDevice()
+    connects = []
+    monkeypatch.setattr("devices.ui.u2.connect", lambda serial: (connects.append(serial), second)[1])
+    driver = UIDriver(FakeADB(tmp_path), device=first)
+
+    # Step 1：让第一次只读查询断线，第二个连接返回正常结果。
+    assert driver.exists("text", "系统") is True
+
+    # Step 2：确认只建立一次新连接并完成重试。
+    assert connects == ["192.168.1.20:5555"]
+    assert len(second.selectors) == 1
+
+
+def test_find_element_reconnects_once_after_transport_failure(tmp_path, monkeypatch):
+    """验证只读 find_element 断线后重连并安全重试一次。"""
+    class BrokenSelector(FakeSelector):
+        def exists(self, timeout=0):
+            raise RemoteDisconnected("remote closed")
+
+    class BrokenDevice(FakeDevice):
+        def __call__(self, **_selector):
+            return BrokenSelector()
+
+    first = BrokenDevice()
+    second = FakeDevice()
+    monkeypatch.setattr("devices.ui.u2.connect", lambda _serial: second)
+    driver = UIDriver(FakeADB(tmp_path), device=first)
+
+    # Step 1：第一次查找读取节点信息时断开，之后由重连的设备提供元素。
+    result = driver.find_element("text", "Network")
+
+    # Step 2：确认重试拿到元素且只重连一次。
+    assert result["text"] == "Network"
+    assert driver._device is second
+
+
+def test_click_transport_failure_is_never_retried(tmp_path, monkeypatch):
+    """验证点击请求断线后不会盲目重复发送。"""
+    calls = 0
+
+    class DisconnectedSelector(FakeSelector):
+        def click(self, timeout=10):
+            nonlocal calls
+            calls += 1
+            raise RemoteDisconnected("response lost")
+
+    class DisconnectedDevice(FakeDevice):
+        def __call__(self, **_selector):
+            return DisconnectedSelector()
+
+    monkeypatch.setattr("devices.ui.u2.connect", lambda _serial: FakeDevice())
+    driver = UIDriver(FakeADB(tmp_path), device=DisconnectedDevice())
+
+    # Step 1：模拟设备可能已收到点击但 HTTP 响应断开。
+    with pytest.raises(UnknownActionOutcome, match="outcome is unknown"):
+        driver.click("text", "系统")
+
+    # Step 2：确认写请求仅发出一次。
+    assert calls == 1
+
+
+def test_back_transport_failure_is_never_retried(tmp_path, monkeypatch):
+    """验证返回键请求断线后不会重复发送。"""
+    device = FakeDevice()
+    calls = 0
+
+    def press(key):
+        nonlocal calls
+        calls += 1
+        raise RemoteDisconnected("response lost")
+
+    device.press = press
+    monkeypatch.setattr("devices.ui.u2.connect", lambda _serial: FakeDevice())
+    driver = UIDriver(FakeADB(tmp_path), device=device)
+
+    # Step 1：模拟 BACK 已发送但设备响应丢失。
+    with pytest.raises(UnknownActionOutcome, match="outcome is unknown"):
+        driver.back()
+
+    # Step 2：确认 BACK 没有第二次发送。
+    assert calls == 1
 
 
 def test_screenshots_keep_first_and_final_evidence(tmp_path):

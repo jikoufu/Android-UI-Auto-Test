@@ -13,10 +13,14 @@ class AndroidTV:
         self.remote = remote
         self.ui = ui
 
-    def get_device_state(self) -> DeviceState:
+    def get_device_state(self, include_activity: bool = True) -> DeviceState:
         """返回当前 Android TV 的设备状态。"""
-        return self.adb.get_device_state()
+        return self.adb.get_device_state(include_activity=include_activity)
 
-    def current_activity(self) -> str | None:
+    def get_static_device_state(self, timeout: float = 3) -> DeviceState:
+        """返回可缓存的静态设备属性，使用短 ADB 超时。"""
+        return self.adb.get_static_device_state(timeout=timeout)
+
+    def current_activity(self, timeout: float | None = None) -> str | None:
         """返回当前前台 Activity 名称。"""
-        return self.adb.current_activity()
+        return self.adb.current_activity(timeout=timeout)

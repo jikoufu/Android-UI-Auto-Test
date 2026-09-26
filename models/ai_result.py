@@ -31,4 +31,5 @@ class AIAnalysisResult(BaseModel):
     decision_steps: list[str] = Field(default_factory=list)
     reason_note: str | None = None
     target_text: str | None = Field(default=None, min_length=1, max_length=100)
+    target_candidate_id: str | None = Field(default=None, min_length=1, max_length=20)
     scroll_direction: str | None = Field(default=None, pattern="^(up|down)$")
