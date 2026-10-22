@@ -1,0 +1,3 @@
+# 仅记录环境变量名称，不填写真实账号或凭证；目前没有账户登录流程。
+account_env: TV_TEST_ACCOUNT
+password_env: TV_TEST_PASSWORD

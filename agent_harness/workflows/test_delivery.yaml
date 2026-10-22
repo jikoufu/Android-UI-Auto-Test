@@ -1,0 +1,20 @@
+protocol_version: 1
+name: test_delivery
+description: 审阅已有变更并形成可追溯的验证和交付记录。
+policies:
+  - AGENTS.md
+  - agent_harness/policies/project.md
+  - agent_harness/policies/evidence.md
+steps:
+  - id: scope
+    skill: agent_harness/skills/requirement_analysis/SKILL.md
+    needs: []
+    outputs: [requirement.md]
+  - id: verification
+    skill: agent_harness/skills/independent_verification/SKILL.md
+    needs: [scope]
+    outputs: [verification.json]
+  - id: review
+    skill: agent_harness/skills/defect_review/SKILL.md
+    needs: [verification]
+    outputs: [review.md]

@@ -1,0 +1,24 @@
+protocol_version: 1
+name: test_development
+description: 从业务验收条件建立测试场景与可执行检查。
+policies:
+  - AGENTS.md
+  - agent_harness/policies/project.md
+  - agent_harness/policies/evidence.md
+steps:
+  - id: requirements
+    skill: agent_harness/skills/requirement_analysis/SKILL.md
+    needs: []
+    outputs: [requirement.md]
+  - id: test_design
+    skill: agent_harness/skills/test_design/SKILL.md
+    needs: [requirements]
+    outputs: [design.md]
+  - id: implementation
+    skill: agent_harness/skills/test_implementation/SKILL.md
+    needs: [test_design]
+    outputs: []
+  - id: verification
+    skill: agent_harness/skills/independent_verification/SKILL.md
+    needs: [implementation]
+    outputs: [verification.json]

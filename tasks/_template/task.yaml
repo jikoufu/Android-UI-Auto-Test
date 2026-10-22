@@ -1,0 +1,11 @@
+protocol_version: 1
+task_id: TASK-TEMPLATE
+template: true
+title: 新任务模板（复制后填写真实目标）
+workflow: feature_development
+status: draft
+acceptance_criteria: []
+artifacts:
+  requirement: requirement.md
+  design: design.md
+  verification: verification.json

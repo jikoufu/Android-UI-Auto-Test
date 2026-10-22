@@ -1,0 +1,20 @@
+protocol_version: 1
+name: defect_review
+description: 审核现有失败证据，区分产品缺陷、测试问题与环境问题。
+policies:
+  - AGENTS.md
+  - agent_harness/policies/project.md
+  - agent_harness/policies/evidence.md
+steps:
+  - id: scope
+    skill: agent_harness/skills/requirement_analysis/SKILL.md
+    needs: []
+    outputs: [requirement.md]
+  - id: verification
+    skill: agent_harness/skills/independent_verification/SKILL.md
+    needs: [scope]
+    outputs: [verification.json]
+  - id: review
+    skill: agent_harness/skills/defect_review/SKILL.md
+    needs: [verification]
+    outputs: [review.md]

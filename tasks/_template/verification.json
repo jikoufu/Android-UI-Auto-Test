@@ -1,0 +1,8 @@
+{
+  "protocol_version": 1,
+  "status": "not_run",
+  "review_mode": "unassigned",
+  "reviewer": null,
+  "checks": [],
+  "limitations": ["任务模板尚未执行任何检查。"]
+}

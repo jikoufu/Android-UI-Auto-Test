@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>TV Automation · 本地控制台</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="stylesheet" href="/css/main.css">
+  <script type="module" src="/js/app.js"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="#overview"><span class="brand-icon">TV</span><span>Automation<span class="brand-sub">ANDROID TV PLATFORM</span></span></a>
+    <p class="nav-caption">工作空间</p>
+    <nav aria-label="控制台导航">
+      <a href="#overview">平台概览</a>
+      <a href="#devices">设备状态</a>
+      <a href="#tasks">测试场景</a>
+      <a href="#reports">运行报告</a>
+      <a href="#capabilities">能力状态</a>
+    </nav>
+    <div class="sidebar-note"><span class="dot"></span> 本地 · 只读控制台<p>独立核心 / Pytest / Agent Harness</p></div>
+  </aside>
+  <main id="overview">
+    <header class="topbar"><span>WORKSPACE / OVERVIEW</span><span id="health" class="badge" role="status">正在连接本地 API</span></header>
+    <section class="intro">
+      <p class="eyebrow">ANDROID TV AUTOMATION</p>
+      <h1>测试工作空间</h1>
+      <p>查看设备、现有测试场景与本地报告。自动化执行核心可通过 Pytest 独立运行。</p>
+    </section>
+    <section class="summary-grid" aria-label="平台概况">
+      <article class="summary"><span>执行入口</span><strong>Pytest</strong><p>在命令行运行测试场景</p></article>
+      <article class="summary"><span>场景目录</span><strong id="scenario-count">—</strong><p>来自仓库内的真实测试函数</p></article>
+      <article class="summary"><span>报告文件</span><strong id="report-count">—</strong><p>runtime/reports 中的本地产物</p></article>
+    </section>
+    <div class="content-grid">
+      <section class="panel" id="devices">
+        <div class="panel-heading"><div><p class="eyebrow">DEVICES</p><h2>设备状态</h2></div><button type="button" id="refresh-devices">查询 ADB</button></div>
+        <p class="muted">点击查询后读取本机 ADB 列表。在线状态不代表设备测试已通过。</p>
+        <div id="device-list" aria-live="polite"><p class="empty">尚未查询设备</p></div>
+      </section>
+      <section class="panel" id="capabilities">
+        <div class="panel-heading"><div><p class="eyebrow">CAPABILITIES</p><h2>能力状态</h2></div><span class="badge">一期基础</span></div>
+        <div id="capability-list" aria-live="polite"><p class="empty">正在读取能力状态…</p></div>
+      </section>
+      <section class="panel full-width" id="tasks">
+        <div class="panel-heading"><div><p class="eyebrow">SCENARIOS</p><h2>测试场景目录</h2></div><span class="badge">Web 调度待实现</span></div>
+        <p class="muted">此目录只列出测试函数；参数化实例和实际收集结果请使用 <code>pytest --collect-only -q</code>。</p>
+        <div id="task-list" aria-live="polite"><p class="empty">正在读取场景…</p></div>
+      </section>
+      <section class="panel full-width" id="reports">
+        <div class="panel-heading"><div><p class="eyebrow">REPORTS</p><h2>运行报告</h2></div><button type="button" id="refresh-reports">刷新报告</button></div>
+        <p class="muted">报告以附件下载。截图与审计日志分别保存在 runtime/evidence、runtime/logs。</p>
+        <div id="report-list" aria-live="polite"><p class="empty">正在读取报告…</p></div>
+      </section>
+    </div>
+    <footer>Monorepo · Modular Monolith · Independent Agent Harness</footer>
+  </main>
+</body>
+</html>

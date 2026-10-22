@@ -1,4 +1,2 @@
-pydantic>=2.6,<3
-PyYAML>=6,<7
-pytest>=8,<10
-uiautomator2>=3.2,<4
+# 兼容旧安装命令；依赖的唯一规范源是 pyproject.toml。
+-e .[dev,web]

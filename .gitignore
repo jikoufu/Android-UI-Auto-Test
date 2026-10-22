@@ -10,19 +10,15 @@ venv/
 .env
 .env.*
 !.env.example
+configs/*.local.*
+configs/accounts.yaml
 
 # Test evidence and generated reports
-reports/*
-!reports/logs/
-!reports/screenshots/
-!reports/ui_dump/
-!reports/.gitkeep
-reports/logs/*
-!reports/logs/.gitkeep
-reports/screenshots/*
-!reports/screenshots/.gitkeep
-reports/ui_dump/*
-!reports/ui_dump/.gitkeep
+/runtime/
+/reports/
+/dist/
+/build/
+*.zip
 
 # IDE and OS files
 .idea/

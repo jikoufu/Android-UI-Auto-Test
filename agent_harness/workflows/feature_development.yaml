@@ -1,0 +1,24 @@
+protocol_version: 1
+name: feature_development
+description: 将功能或架构变更转为可验证的实现。
+policies:
+  - AGENTS.md
+  - agent_harness/policies/project.md
+  - agent_harness/policies/evidence.md
+steps:
+  - id: requirements
+    skill: agent_harness/skills/requirement_analysis/SKILL.md
+    needs: []
+    outputs: [requirement.md]
+  - id: design
+    skill: agent_harness/skills/architecture_design/SKILL.md
+    needs: [requirements]
+    outputs: [design.md]
+  - id: implementation
+    skill: agent_harness/skills/implementation/SKILL.md
+    needs: [design]
+    outputs: []
+  - id: verification
+    skill: agent_harness/skills/independent_verification/SKILL.md
+    needs: [implementation]
+    outputs: [verification.json]
