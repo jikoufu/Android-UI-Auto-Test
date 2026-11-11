@@ -1,6 +1,8 @@
 # Agent Harness
 
-本目录提供可人工执行的研发文件协议：意图路由、四条工作流、七项技能、工具适配说明、项目政策和离线校验。它不启动 Agent、不调模型、不执行命令，也不属于测试运行时的 AI Step 恢复。运行时 AI 实现在 `automation_core/ai/`。
+本目录提供可人工执行的研发文件协议，包括意图路由、四条 YAML 工作流、技能、工具适配说明、项目政策和离线校验。运行时 AI 实现在 `automation_core/ai/`。
+
+在 Git 源码检出中，可手动调用 Codex 的 `$dev-workflow` 或 Claude Code 的 `/dev-workflow` 创建独立任务工作区和管理状态。执行范围和后续阶段见 [Dev Workflow](workflows/workflow.md)。
 
 ## 使用
 
