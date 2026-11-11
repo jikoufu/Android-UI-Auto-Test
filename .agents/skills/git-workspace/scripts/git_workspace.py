@@ -14,7 +14,8 @@ from time import sleep
 from uuid import uuid4
 
 
-BASE_REF = "refs/remotes/origin/master"
+BASE_BRANCH_ENV = "TV_AUTOMATION_BASE_BRANCH"
+DEFAULT_BASE_BRANCH = "master"
 BRANCH_PREFIX = "codex/git-workspace/"
 TASK_PATTERN = r"[a-z0-9]+(?:-[a-z0-9]+)*"
 WORKTREE_PATTERN = rf"({TASK_PATTERN})-[0-9a-f]{{32}}"
@@ -25,8 +26,10 @@ class WorkspaceError(Exception):
     pass
 
 
-class BaselineRefLocked(WorkspaceError):
-    pass
+class GitCommandError(WorkspaceError):
+    def __init__(self, message: str, stderr: bytes) -> None:
+        super().__init__(message)
+        self.stderr = stderr
 
 
 def git(directory: Path, *args: str, error: str) -> bytes:
@@ -49,11 +52,7 @@ def git(directory: Path, *args: str, error: str) -> bytes:
         raise WorkspaceError(f"{error} Git timed out after {GIT_TIMEOUT} seconds.") from exc
     if result.returncode:
         # Git stderr can include the remote URL and its credentials.
-        if b"couldn't find remote ref refs/heads/master" in result.stderr:
-            raise WorkspaceError("origin has no master branch. No task workspace was created.")
-        if f"cannot lock ref '{BASE_REF}'".encode("ascii") in result.stderr:
-            raise BaselineRefLocked("Cannot update origin/master because its ref is locked.")
-        raise WorkspaceError(f"{error} Git exit code: {result.returncode}.")
+        raise GitCommandError(f"{error} Git exit code: {result.returncode}.", result.stderr)
     return result.stdout
 
 
@@ -79,21 +78,36 @@ def require_directory(path: Path) -> None:
 
 
 def fetch_baseline(directory: Path) -> str:
-    # Fetch only origin master. Override remote ref mappings and pruning settings.
+    branch = os.environ.get(BASE_BRANCH_ENV, DEFAULT_BASE_BRANCH)
+    invalid_branch = f"{BASE_BRANCH_ENV} must be a Git branch name such as master or main."
+    if not branch or branch.startswith("-") or branch.casefold() == "head":
+        raise WorkspaceError(invalid_branch)
+    source_ref = f"refs/heads/{branch}"
+    tracking_ref = f"refs/remotes/origin/{branch}"
+    git(directory, "check-ref-format", source_ref, error=invalid_branch)
+
+    # Fetch only the configured branch, regardless of remote fetch and pruning settings.
     for attempt in range(3):
         try:
             git(directory, "fetch", "--no-tags", "--no-prune", "--no-prune-tags",
                 "--no-recurse-submodules", "--no-auto-maintenance", "--no-write-fetch-head",
-                "--refmap=", "origin", f"+refs/heads/master:{BASE_REF}",
-                error="Cannot fetch origin master. Check the remote and credentials.")
+                "--refmap=", "origin", f"+{source_ref}:{tracking_ref}",
+                error=f"Cannot fetch origin {branch}. Check the remote and credentials.")
             break
-        except BaselineRefLocked:
+        except GitCommandError as exc:
+            if os.fsencode(f"couldn't find remote ref {source_ref}") in exc.stderr:
+                raise WorkspaceError(
+                    f"origin has no {branch} branch. No task workspace was created. "
+                    f"Set {BASE_BRANCH_ENV} to an existing branch to use a different baseline."
+                ) from exc
             # Another task may have advanced the shared ref during this fetch.
-            if attempt == 2:
+            if os.fsencode(f"cannot lock ref '{tracking_ref}'") not in exc.stderr:
                 raise
+            if attempt == 2:
+                raise WorkspaceError(f"Cannot update origin/{branch} because its ref is locked.") from exc
             sleep(0.1 * (attempt + 1))
-    return git(directory, "rev-parse", "--verify", f"{BASE_REF}^{{commit}}",
-               error="Cannot resolve origin/master to a commit.").strip().decode("ascii")
+    return git(directory, "rev-parse", "--verify", f"{tracking_ref}^{{commit}}",
+               error=f"Cannot resolve origin/{branch} to a commit.").strip().decode("ascii")
 
 
 def create(directory: Path, storage: Path, task: str) -> dict[str, str]:
@@ -153,7 +167,7 @@ def preview_cleanup(directory: Path, main: Path, storage: Path,
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("create", help="fetch origin master and create a fresh task worktree").add_argument("task")
+    commands.add_parser("create", help="fetch the configured origin branch and create a task worktree").add_argument("task")
     commands.add_parser("cleanup", help="preview manual removal of a clean task worktree").add_argument(
         "worktree", type=Path,
     )
