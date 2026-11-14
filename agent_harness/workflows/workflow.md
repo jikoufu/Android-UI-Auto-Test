@@ -7,7 +7,7 @@
 | Git Workspace | `git_workspace` | 调用现有 `git-workspace` 的 `create`，按返回结果记录工作区 |
 | Requirements | `requirements` | 调用共享的 [需求分析 Skill](../skills/requirement_analysis/SKILL.md)，提交草稿并等待用户确认 |
 | Design | `design` | 使用已核验的需求批准快照，调用共享的 [架构设计 Skill](../skills/architecture_design/SKILL.md) 并等待用户确认 |
-| Test Design | `test_design` | `not_implemented` |
+| Test Design | `test_design` | 验证两份上游快照，调用共享的 [测试设计 Skill](../skills/test_design/SKILL.md)，运行先行测试并等待人工批准 |
 | Development | `development` | `not_implemented` |
 | Acceptance | `acceptance` | `not_implemented` |
 | Integration & Cleanup | `integration_cleanup` | `not_implemented` |
@@ -35,7 +35,7 @@ python agent_harness/workflows/dev_workflow.py revise-requirements 0123456789abc
 - 写完草稿后，在同一次手动工作流调用中执行 `submit <task_id> --stage requirements --version <state_version>`，使用开始本轮编辑时编排器返回的版本。CLI 检查文档位置和内容。有待确认问题时进入 `requirements/waiting_for_input`，列出问题后停止。用户通过 `continue <task_id> <答复>` 补充后，用 `continue <task_id> --with-input` 运行 CLI，再更新原草稿并提交。仅在用户本次确实提供补充时传入 `--with-input`。
 - 完整草稿进入 `requirements/waiting_for_approval`。向用户展示需求摘要和逐项验收标准，并给出 `approve <task_id> <requirements_sha256> --stage requirements --version <state_version>`，使用提交结果返回的 SHA-256 和版本。等待用户另行手动调用 `$dev-workflow approve ...` 或 `/dev-workflow approve ...`，并转发用户提供的完整批准命令。普通继续、提交或恢复命令均不会批准需求。
 - `approve` 重新核对 Worktree、文档、待确认问题和提交版本。文档被修改后需要 `continue`、重新 `submit`，再由用户确认新版本。批准时，编排器把同一份已校验字节发布为只写一次的 Worktree 快照，再记录审批 ID 和 SHA-256。快照校验成功后 Requirements 为 `completed`，当前阶段变为 `design/running`。
-- `status` 只读取状态。`pause` 保存暂停前的状态。`resume` 恢复原状态，保留文档和已提交版本。恢复到 `waiting_for_input` 或 `waiting_for_approval` 时继续等待。`continue` 可在 Worktree 或快照恢复后重试失败的阶段，也可接续第二步留下的 `requirements/not_implemented` 任务。
+- `status` 展示状态，并在已批准 Test Design 的任务上核对批准内容。`pause` 保存暂停前的状态。`resume` 恢复原状态，保留文档和已提交版本。恢复到 `waiting_for_input` 或 `waiting_for_approval` 时继续等待。`continue` 可在 Worktree 或快照恢复后重试失败的阶段，也可接续第二步留下的 `requirements/not_implemented` 任务。
 
 创建 Worktree 失败时保持 `git_workspace/failed`。Worktree 创建成功后，无法核对登记信息或准备文档路径时记录 `requirements/failed`。提交或批准校验失败时保留原状态。落盘失败时命令返回非零退出码并将诊断写入 stderr。
 
@@ -43,8 +43,30 @@ python agent_harness/workflows/dev_workflow.py revise-requirements 0123456789abc
 
 - Requirements 的人工 `approve` 成功后，或 Design 的 `continue`、`resume` 返回 `design/running` 后，编排器在同一次已授权的运行中调用 [共享 Design Skill](../skills/architecture_design/SKILL.md)。先执行 `design-input <task_id>`。模型只使用其返回的 `approved_requirements` 作为已批准需求正文。该命令重新核对 Worktree、审批 ID、内容 SHA-256 和需求结构。快照缺失、损坏或哈希不匹配时停止。历史任务只有批准摘要而没有快照时，需要用户手动发起需求变更并重新审批。
 - 在已有 Worktree 内调查，只写 `design_path` 指向的 `design.md`。随后执行 `submit <task_id> --stage design --version <state_version>`，使用本轮 `design-input` 返回的版本。Design 草稿有阻塞问题时进入 `waiting_for_input`，完整草稿进入 `waiting_for_approval`。用户补充技术问题后才用 `continue <task_id> --with-input` 恢复。存在 `RQ` 问题时等待用户发起需求变更，普通继续无法跳过。
-- 在 `waiting_for_approval` 展示设计摘要、关键取舍和风险，然后请用户另行手动调用 `approve <task_id> <design_sha256> --stage design --version <state_version>`，使用提交结果的 SHA-256 和版本。编排器重新验证设计结构、全部 FR 和需求批准版本。批准后保存绑定了需求审批 ID 和 SHA-256 的设计快照，Design 为 `completed`，停在 `test_design/not_implemented`。
+- 在 `waiting_for_approval` 展示设计摘要、关键取舍和风险，然后请用户另行手动调用 `approve <task_id> <design_sha256> --stage design --version <state_version>`，使用提交结果的 SHA-256 和版本。编排器重新验证设计结构、全部 FR 和需求批准版本。批准后保存设计快照并进入 `test_design/running`。
 - 用户要变更已批准需求时，手动调用 `revise-requirements <task_id> <变更说明>`。编排器撤销当前需求与设计的批准引用并回到 `requirements/running`，保留现有 Worktree、草稿和历史快照。重新批准会产生新的需求审批 ID。旧 Design 草稿必须根据新快照更新并重新提交确认，即使两次需求正文的 SHA-256 相同。
+
+## Test Design 调用与确认
+
+- Design 批准，或继续、恢复返回 `test_design/running` 后，执行 `python agent_harness/workflows/dev_workflow.py test-design-input <task_id>`，再读取共享测试设计 Skill。以输出中的需求与设计正文为依据，在现有 Worktree 编辑测试和 `test_plan_path`。旧版 `test_design/not_implemented` 任务使用 `continue` 进入。
+- 有待确认问题时提交草稿后等待补充。计划完整且有自动化用例时，执行 `test-run <task_id> --stage test_design --version <state_version>`。只运行计划中明确列出的 pytest 节点，并排除 device 和 ai 标记。使用本地或替身测试，真实设备及外部服务场景记录为环境依赖。证据含原始 pytest 退出码。命令成功表示证据已记录，逐项结果决定能否提交。
+- 用最新运行结果的版本执行 `submit <task_id> --stage test_design --version <state_version>`。人工计划可直接提交。自动化计划必须有当前版本的运行证据，且逐项符合计划。向用户展示追踪和实测证据，等待用户手动调用 `approve <task_id> <test_design_sha256> --stage test_design --version <state_version>`。审批摘要绑定计划、测试代码、fixture、配置和实测证据。人工批准后停在 `development/not_implemented`。
+- 自动化 pytest 在临时副本中运行，只收集计划指定的 `unit_tests/test_design/` 节点。运行器跳过仓库 pytest 配置、上级 conftest 和自动加载的插件。依赖来自预先配置的独立虚拟环境。证据绑定捕获的文件和执行策略版本，旧证据需重跑。隐式发现的已删除文件不进入捕获清单，显式引用的测试和输入仍须存在。
+- 批准时将计划、已核对的输入和执行证据保存到只写一次的 ZIP。状态记录包含其 SHA-256。编排器先检查工作副本，再在原子替换状态文件前核验归档结构、成员、摘要及其与审批摘要的关联；失败时保留待审批状态。批准结果的 `test_design_approval_scope: verified_archive` 表示批准归档版本。任务锁不锁定编辑器，工作副本可能在检查后发生变化，这些变更不会获得批准。`status` 或 `continue` 检出变化后撤销过期批准。
+- 后续消费必须在任务锁内重新加载当前状态、检查阶段和版本，并调用 `verify_approved_test_bundle(task)`；该函数默认检查工作副本是否过期，并返回同一次校验的归档输入字节。仅消费返回的字节，不能再读取可变文件替代它们。`check_live=False` 仅供审批发布时验证归档使用。Development 尚未实现，不得直接依据状态字符串启动开发。修改批准的需求仍使用 `revise-requirements`，会使下游批准失效。
+
+自动取证环境由操作者预先准备。设置 `TV_TEST_DESIGN_PYTHON` 为专用虚拟环境解释器的绝对路径。PowerShell 示例使用项目虚拟环境的 pip 向专用环境安装 pytest。
+
+```powershell
+$testDesignEnv = Join-Path $env:TEMP 'tv-test-design'
+& .venv/Scripts/python.exe -m venv --without-pip $testDesignEnv
+$env:TV_TEST_DESIGN_PYTHON = Join-Path $testDesignEnv 'Scripts/python.exe'
+& .venv/Scripts/python.exe -m pip --python $env:TV_TEST_DESIGN_PYTHON install pytest
+```
+
+在包含项目 `.venv` 的检出目录执行准备命令。Linux/macOS 使用 `bin/python`。只以 wheel 安装所需测试依赖，专用环境禁用系统包、editable 安装和启动钩子。依赖包由环境管理，归档记录 Python 和 pytest 版本。
+
+本地模式仅运行已审查的纯逻辑测试及其导入和 fixture。子进程审计钩子用于补充防护，子进程尝试会使证据失效。需要真实设备、服务或外部进程的场景用替身或标记为 environment。执行任意或不可信测试需要操作系统或 CI 隔离。暂时无法读取归档或查询 Git 时，检查命令返回可重试错误并保留批准。
 
 提交和审批在任务锁内核对阶段与版本。拒绝过期命令时保留当前状态和产物。不要替旧会话刷新版本并重试原命令。恢复到待审批状态时，从恢复结果重新展示同一草稿的新批准命令，等待用户确认。旧版无版本记录可查询，继续或恢复编辑后重新提交。
 

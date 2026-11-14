@@ -96,10 +96,11 @@ def test_codex_and_claude_use_the_same_internal_requirements_and_design_skills()
 
     workflow = root / "agent_harness/workflows/workflow.md"
     assert "agent_harness/workflows/workflow.md" in codex
-    for internal in ("../skills/requirement_analysis/SKILL.md", "../skills/architecture_design/SKILL.md"):
+    for internal in ("../skills/requirement_analysis/SKILL.md", "../skills/architecture_design/SKILL.md",
+                     "../skills/test_design/SKILL.md"):
         assert f"]({internal})" in workflow.read_text(encoding="utf-8")
         assert (workflow.parent / internal).is_file()
     for native_directory in (root / ".agents/skills", root / ".claude/skills"):
         assert not any((native_directory / name / "SKILL.md").exists() for name in (
-            "requirements", "requirement-analysis", "requirement_analysis", "design", "architecture_design",
+            "requirements", "requirement-analysis", "requirement_analysis", "design", "architecture_design", "test-design",
         ))
