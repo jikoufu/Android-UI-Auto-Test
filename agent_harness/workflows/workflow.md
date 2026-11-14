@@ -9,7 +9,7 @@
 | Design | `design` | 使用已核验的需求批准快照，调用共享的 [架构设计 Skill](../skills/architecture_design/SKILL.md) 并等待用户确认 |
 | Test Design | `test_design` | 验证两份上游快照，调用共享的 [测试设计 Skill](../skills/test_design/SKILL.md)，运行先行测试并等待人工批准 |
 | Development | `development` | 使用 [共享 Implementation Skill](../skills/implementation/SKILL.md) 实现、复测并等待人工批准 |
-| Acceptance | `acceptance` | `not_implemented` |
+| Acceptance | `acceptance` | 使用 [共享独立验证 Skill](../skills/independent_verification/SKILL.md) 复测、审查并等待人工批准 |
 | Integration & Cleanup | `integration_cleanup` | `not_implemented` |
 
 ## 命令
@@ -76,6 +76,17 @@ $env:TV_TEST_DESIGN_PYTHON = Join-Path $testDesignEnv 'Scripts/python.exe'
 - 实现和记录完整后用 `submit <task_id> --stage development --version <state_version>`。提交绑定开发记录、实现内容和当前的 Green 证据。向用户展示摘要、追踪和验证限制，请用户另行手动调用 `approve <task_id> <development_sha256> --stage development --version <state_version>`。批准后停止于 `acceptance/not_implemented`。
 
 - Development 批准把同一份经校验的记录、源码和证据写入只写一次的 ZIP，返回归档路径与 SHA-256。批准范围是归档字节。任务锁无法阻止编辑器改稿，后续 `status` 检查归档和工作副本，差异时返回非零并保留批准记录。历史结果仍可查询，`test_evidence.policy` 保留原策略版本。用户可恢复批准版本，或手动调用诊断中的 `revise-development <task_id> --stage acceptance --version <state_version>`。重开后保留原归档和工作成果，重新测试、提交和人工批准。若原 Test Design 证据不符合当前策略，须先用 `revise-tests` 重新取证和审批。后续消费者应先核验工作副本，再消费同一次校验返回的归档字节。
+
+## Acceptance 调用与确认
+
+- 用户手动继续已批准的任务时，执行 `continue <task_id> --stage acceptance --version <state_version>`。只有上游批准归档和绑定的 Worktree 经核验后才会进入 `acceptance/running`。使用 `acceptance-input <task_id>` 获取批准的需求、设计、测试方案和开发归档信息，按共享独立验证 Skill 执行。
+- 在绑定的 Worktree 审查最终变更。用 `test-run <task_id> --stage acceptance --version <state_version>` 对批准的开发字节重新运行计划中的离线节点，保留独立的 `acceptance_evidence`。按项目 pytest 配置另跑必要的离线集成与回归。所有人工计划均在报告中记录实际验证。
+- 在 `acceptance_path` 写报告后执行 `submit <task_id> --stage acceptance --version <state_version>`。FAIL 保留工作区和诊断，BLOCKED 进入等待输入。收到用户补充后以 `continue --with-input` 恢复。暂停、恢复、阻塞和失败命令沿用当前阶段和版本参数。
+- PASS 和 PASS WITH RISKS 进入待批准。展示结论、未执行项、风险和报告摘要，等待用户另行手动调用 `approve <task_id> <acceptance_sha256> --stage acceptance --version <state_version>`。批准绑定报告字节、开发批准归档与独立 pytest 证据，并进入 `acceptance/awaiting_integration`。重新查询会核验批准报告及其开发输入。
+- `awaiting_integration` 是验收终点。集成需人工授权。先用 `status` 复核批准归档和任务 Worktree，再固定待合并的完整提交 SHA。用 `git status --short --untracked-files=all` 检查未提交和未跟踪的交付文件，用 `git diff <base_commit> <提交 SHA>` 核对提交内容与批准版本，包括文件模式和随提交交付的报告及快照。只合并人工核对过的 SHA。交付内容变化时用 `revise-development <task_id> --stage acceptance --version <state_version>` 重开开发并重新验收。
+- 合并后获取目标分支最新版本。对保留历史的合并，用 `git merge-base --is-ancestor <已核对的提交 SHA> origin/<target>` 核对集成结果，并确认当前任务 HEAD 没有额外未合并成果。压缩或变基合并需要人工核对对应成果。检查索引和本地文件后执行 [Git Workspace 清理预检](../../.agents/skills/git-workspace/SKILL.md)，仅在用户另行授权后执行预检返回的普通删除命令。
+
+## 通用状态与批准规则
 
 提交和审批在任务锁内核对阶段与版本。拒绝过期命令时保留当前状态和产物。不要替旧会话刷新版本并重试原命令。恢复到待审批状态时，从恢复结果重新展示同一草稿的新批准命令，等待用户确认。旧版无版本记录可查询，通常可继续或恢复编辑。缺少需求快照且处于 `design/not_implemented` 的旧任务可手动调用 `revise-requirements <task_id> --stage design --version 0`，返回 Requirements 并从版本 1 重新审批。
 

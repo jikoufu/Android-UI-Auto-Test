@@ -194,7 +194,7 @@ def dev_workflow(repositories, monkeypatch):
         WORKFLOW_SCRIPT, WORKFLOW_SCRIPT.with_name("requirements_document.py"),
         WORKFLOW_SCRIPT.with_name("approved_artifacts.py"), WORKFLOW_SCRIPT.with_name("design_document.py"),
         WORKFLOW_SCRIPT.with_name("test_design_document.py"), WORKFLOW_SCRIPT.with_name("pytest_evidence.py"),
-        WORKFLOW_SCRIPT.with_name("pytest_runner.py"),
+        WORKFLOW_SCRIPT.with_name("pytest_runner.py"), WORKFLOW_SCRIPT.with_name("acceptance_document.py"),
         SCRIPT.relative_to(project),
     ):
         destination = source / script
