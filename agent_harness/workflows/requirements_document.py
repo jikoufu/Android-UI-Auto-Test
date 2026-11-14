@@ -11,6 +11,10 @@ class RequirementsError(Exception):
     pass
 
 
+class GitReadError(RequirementsError):
+    pass
+
+
 QUESTIONS = "待确认问题"
 FUNCTIONS = "功能需求"
 ACCEPTANCE = "验收标准"
@@ -33,7 +37,7 @@ def read_git(path: Path, *args: str) -> bytes:
             stdin=subprocess.DEVNULL, capture_output=True, env=env, timeout=30, check=True,
         ).stdout
     except (OSError, subprocess.SubprocessError) as exc:
-        raise RequirementsError("Could not verify the task Worktree registration with Git.") from exc
+        raise GitReadError("Could not verify the task Worktree registration with Git.") from exc
 
 
 def verify_worktree(project: Path, path: Path, branch: str) -> None:
@@ -159,6 +163,11 @@ def declared_ids(section: str, pattern: str) -> set[str]:
 
 def review_requirements(data: bytes) -> set[str] | None:
     """Return traceable FR identifiers, or None while questions are open."""
+    trace = requirements_trace(data)
+    return set(trace) if trace is not None else None
+
+
+def requirements_trace(data: bytes) -> dict[str, set[str]] | None:
     try:
         sections = markdown_sections(
             data.decode("utf-8-sig"), record_sections=(FUNCTIONS, ACCEPTANCE, TRACE, QUESTIONS),
@@ -174,19 +183,19 @@ def review_requirements(data: bytes) -> set[str] | None:
         raise RequirementsError(f"Missing or empty requirements sections: {', '.join(missing)}")
     functions = declared_ids(sections[FUNCTIONS], FR_ID)
     criteria = declared_ids(sections[ACCEPTANCE], AC_ID)
-    traced_functions: set[str] = set()
+    trace: dict[str, set[str]] = {}
     traced_criteria: set[str] = set()
     for line in sections[TRACE].splitlines():
         if not line.strip():
             continue
         row = re.fullmatch(rf"- ({FR_ID}): ({AC_ID}(?:,[ \t]*{AC_ID})*)", line.rstrip())
-        if not row or row[1] in traced_functions:
+        if not row or row[1] in trace:
             raise RequirementsError("Use one trace row per FR, for example - FR-001: AC-001, AC-002.")
         row_criteria = re.findall(AC_ID, row[2])
         if len(row_criteria) != len(set(row_criteria)):
             raise RequirementsError(f"Duplicate acceptance reference for {row[1]}.")
-        traced_functions.add(row[1])
+        trace[row[1]] = set(row_criteria)
         traced_criteria.update(row_criteria)
-    if traced_functions != functions or traced_criteria != criteria:
+    if trace.keys() != functions or traced_criteria != criteria:
         raise RequirementsError("The trace section must cover all and only the declared FR and AC identifiers.")
-    return functions
+    return trace

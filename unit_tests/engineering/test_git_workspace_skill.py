@@ -193,6 +193,8 @@ def dev_workflow(repositories, monkeypatch):
     for script in (
         WORKFLOW_SCRIPT, WORKFLOW_SCRIPT.with_name("requirements_document.py"),
         WORKFLOW_SCRIPT.with_name("approved_artifacts.py"), WORKFLOW_SCRIPT.with_name("design_document.py"),
+        WORKFLOW_SCRIPT.with_name("test_design_document.py"), WORKFLOW_SCRIPT.with_name("pytest_evidence.py"),
+        WORKFLOW_SCRIPT.with_name("pytest_runner.py"),
         SCRIPT.relative_to(project),
     ):
         destination = source / script
@@ -597,7 +599,7 @@ def test_design_review_pauses_and_requires_approval(repositories, dev_workflow):
     assert stale.returncode == 1 and "changed after submission" in stale.stderr
     target.write_bytes(original)
     approved = workflow_report(dev_workflow, source, "approve", task_id, review["design_sha256"], *stage_args(review))
-    assert (approved["current_stage"], approved["status"]) == ("test_design", "not_implemented")
+    assert (approved["current_stage"], approved["status"]) == ("test_design", "running")
     assert approved["stages"]["design"] == "completed"
     assert approved["requirements_approval_id"] == task["requirements_approval_id"]
     assert Path(approved["design_snapshot"]).read_bytes() == original
