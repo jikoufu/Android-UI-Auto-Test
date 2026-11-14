@@ -24,11 +24,12 @@ def classify(report: dict, node: str, case: PlanCase) -> dict:
         reason = "Unsupported external process attempt. Use a fake or an environment test."
     elif not reason and report["exit_code"] not in (0, 1):
         reason = f"pytest exited with code {report['exit_code']}."
+    elif not reason and any(entry["xfail"] or entry["outcome"] == "skipped" for entry in entries):
+        return {"status": "not_verified", "reason": "pytest skipped or xfailed the node."}
     elif not reason and (len(entries) != 3 or set(phases) != {"setup", "call", "teardown"}):
         reason = "Node did not complete setup, call and teardown exactly once."
     elif not reason:
-        invalid = next((entry for entry in entries if entry["xfail"] or entry["outcome"] == "skipped"
-                        or (entry["phase"] != "call" and entry["outcome"] != "passed")), None)
+        invalid = next((entry for entry in entries if entry["phase"] != "call" and entry["outcome"] != "passed"), None)
         if invalid:
             reason = f"{invalid['phase']}: {invalid['exception'] or invalid['outcome']}."
         elif call["outcome"] == "passed":
