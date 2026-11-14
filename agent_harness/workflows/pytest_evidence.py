@@ -12,7 +12,7 @@ else:
     from requirements_document import RequirementsError
     from test_design_document import PlanCase, pytest_file
 
-EVIDENCE_POLICY = "offline-unit-assertion-v3"
+EVIDENCE_POLICY = "offline-unit-assertion-v5"
 
 
 def classify(report: dict, node: str, case: PlanCase) -> dict:
@@ -39,7 +39,13 @@ def classify(report: dict, node: str, case: PlanCase) -> dict:
             return {"status": "red", "reason": "Assertion failed in the test function.", "phase": "call",
                     "exception": call["exception"], "location": call["location"]}
         else:
-            reason = f"call: {call['exception'] or call['outcome']}."
+            reason = (
+                "Red requires a failure location with one assertion statement. Split multiple statements onto separate lines."
+                if case.mode == "red" and call.get("ambiguous_assertion")
+                else f"call: {call['exception'] or call['outcome']}."
+            )
+            if case.mode == "red" and call.get("test_assertion") is False and not call.get("ambiguous_assertion"):
+                reason = "Could not locate a single assertion in the test source."
     return {"status": "error", "reason": reason}
 
 

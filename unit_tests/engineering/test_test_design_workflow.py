@@ -459,6 +459,16 @@ def test_approval_rejects_legacy_evidence_and_preserves_state_on_write_failure(
 @pytest.mark.parametrize(("code", "expected"), [
     ('def test_status():\n    assert False, "status should be ready"\n', "red"),
     ('def test_status():\n    assert 2 == 3, "different diagnostic"\n', "red"),
+    ('def test_status():\n    assert True; assert False\n', "error"),
+    ('def test_status():\n    assert False; assert True\n', "error"),
+    ('def test_status():\n    assert """first\nsecond""" == "ready"\n', "red"),
+    ('def test_status():\n    if True:\n        assert """first\nsecond""" == "ready"\n', "red"),
+    ('def test_status():\n    if True: assert False\n', "red"),
+    ('def test_status():\n    if (\n        True\n    ): assert False\n', "red"),
+    ('def test_status():\n    if True: assert True; assert False\n', "error"),
+    ('def test_status():\n    assert (\n        False\n    ); assert True\n', "error"),
+    ('def test_status():\n    assert (\n        True\n    ); assert False\n', "error"),
+    ('def test_status():\n    assert (\n        2 == 3\n    ), "expected; diagnostic"\n', "red"),
     ('def helper():\n    assert False\ndef test_status():\n    helper()\n', "error"),
     ('def test_status():\n    raise AssertionError("status should be ready")\n', "error"),
     ('def test_status():\n    pass\n', "unexpected_green"),
@@ -469,13 +479,18 @@ def test_approval_rejects_legacy_evidence_and_preserves_state_on_write_failure(
     ('import pytest\n@pytest.mark.device\ndef test_status():\n    assert False, "status should be ready"\n', "error"),
 ])
 def test_pytest_evidence_distinguishes_red_from_other_outcomes(tmp_path, code, expected):
+    """验证只有可定位的单条业务断言失败才计为 Red。"""
     test = tmp_path / "unit_tests/test_design/test_status.py"
     test.parent.mkdir(parents=True)
     test.write_text(code, encoding="utf-8")
     evidence = run_cases(tmp_path, {"TC-001": PlanCase("red", "unit_tests/test_design/test_status.py::test_status", "status should be ready")})
     assert evidence["outcomes"]["TC-001"]["status"] == expected
+    if "; assert" in code:
+        assert "Split multiple statements" in evidence["outcomes"]["TC-001"]["reason"]
     if expected == "red":
         assert evidence["exit_code"] == 1
+        if '"""first' in code:
+            assert evidence["outcomes"]["TC-001"]["location"]["line"] == (3 if "if True" in code else 2)
         print(f"RED evidence: {evidence}")
 
 

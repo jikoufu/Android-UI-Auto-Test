@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import dis
 import json
 import os
 from pathlib import Path
@@ -17,6 +19,38 @@ if __package__:
 TIMEOUT = 120
 MARKERS = "not device and not ai"
 HOST_ENV = {"SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "PATH", "PATHEXT", "TMP", "TEMP", "TMPDIR", "LANG", "LC_ALL"}
+
+
+def assertion_location(path: Path, position: dis.Positions) -> tuple[int | None, bool]:
+    """Return the assertion's starting line and whether its location is ambiguous."""
+    line, end_line, column, end_column = position
+    if None in position:
+        return None, False
+    try:
+        tree = ast.parse(path.read_bytes())
+    except (OSError, SyntaxError, ValueError):
+        return None, False
+    statements = [node for node in ast.walk(tree) if isinstance(node, ast.stmt)]
+    matches = [node for node in statements if isinstance(node, ast.Assert) and node.lineno <= line <= node.end_lineno]
+    if len(matches) != 1:
+        return None, len(matches) > 1
+    assertion = matches[0]
+    if (
+        (line, column) < (assertion.lineno, assertion.col_offset)
+        or (end_line, end_column) > (assertion.end_lineno, assertion.end_col_offset)
+    ):
+        return None, False
+    for node in statements:
+        if node is assertion:
+            continue
+        if assertion.lineno <= node.lineno <= assertion.end_lineno or (
+            node.end_lineno == assertion.lineno and node.end_col_offset <= assertion.col_offset
+        ):
+            # A compound statement's header and its own inline assertion
+            # describe one failure site, unlike independent sibling statements.
+            if assertion not in ast.walk(node):
+                return None, True
+    return assertion.lineno, False
 
 
 def clean_python() -> Path:
@@ -102,12 +136,24 @@ def worker(output: Path, args: list[str]) -> int:
                 "exception": error.typename if error else None,
             }
             if error and error.type is AssertionError:
-                origin = error.traceback[-1]
-                entry["test_assertion"] = (
-                    origin.frame.code.raw is getattr(item.obj, "__code__", None)
-                    and bool(re.match(r"^assert\b", str(origin.statement).lstrip()))
-                )
-                entry["location"] = {"file": item.location[0], "line": origin.lineno + 1}
+                origin = error.value.__traceback__
+                while origin is not None and origin.tb_next is not None:
+                    origin = origin.tb_next
+                entry["test_assertion"] = False
+                if origin is not None and origin.tb_frame.f_code is getattr(item.obj, "__code__", None):
+                    # Native operations can raise AssertionError in the caller's frame.
+                    # Only the assertion's own raise instruction is a Red candidate.
+                    instruction = next(
+                        (op for op in dis.get_instructions(origin.tb_frame.f_code)
+                         if op.offset == origin.tb_lasti),
+                        None,
+                    )
+                    if instruction is not None and instruction.opname == "RAISE_VARARGS" and instruction.positions is not None:
+                        line, ambiguous = assertion_location(item.path, instruction.positions)
+                        entry["test_assertion"] = line is not None
+                        entry["ambiguous_assertion"] = ambiguous
+                        if line is not None:
+                            entry["location"] = {"file": item.location[0], "line": line}
             reports.setdefault(item.nodeid, []).append(entry)
 
     sys.path.insert(0, str(Path.cwd()))
