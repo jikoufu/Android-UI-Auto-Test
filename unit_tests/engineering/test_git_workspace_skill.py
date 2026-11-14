@@ -556,11 +556,18 @@ def test_design_requires_verified_snapshot(repositories, dev_workflow):
     record = source / "runtime" / "state" / "dev-workflow" / task_id / "state.json"
     legacy = json.loads(record.read_text(encoding="utf-8"))
     legacy.update(status="not_implemented", requirements_approval_id=None)
+    legacy.pop("state_version")
     record.write_text(json.dumps(legacy), encoding="utf-8")
     continued = workflow(dev_workflow, source, "continue", task_id)
     assert continued.returncode == 1 and "No approved Requirements snapshot" in continued.stderr
-    revised = workflow_report(dev_workflow, source, "revise-requirements", task_id)
+    before_revision = workflow_report(dev_workflow, source, "status", task_id)
+    assert before_revision["state_version"] == 0
+    assert workflow(dev_workflow, source, "revise-requirements", task_id).returncode != 0
+    assert workflow(dev_workflow, source, "revise-requirements", task_id, "--stage", "design", "--version", "1").returncode == 1
+    revised = workflow_report(dev_workflow, source, "revise-requirements", task_id, *stage_args(before_revision))
     assert revised["approval_history"] == []
+    assert (revised["current_stage"], revised["state_version"]) == ("requirements", 1)
+    assert workflow(dev_workflow, source, "revise-requirements", task_id, *stage_args(before_revision)).returncode == 1
 
 
 def test_design_review_pauses_and_requires_approval(repositories, dev_workflow):
@@ -604,7 +611,7 @@ def test_design_review_pauses_and_requires_approval(repositories, dev_workflow):
     assert approved["requirements_approval_id"] == task["requirements_approval_id"]
     assert Path(approved["design_snapshot"]).read_bytes() == original
     assert workflow_report(dev_workflow, source, "status", task_id) == approved
-    revised = workflow_report(dev_workflow, source, "revise-requirements", task_id)
+    revised = workflow_report(dev_workflow, source, "revise-requirements", task_id, *stage_args(approved))
     assert revised["approval_history"] == [
         {
             "stage": "requirements", "approval_id": approved["requirements_approval_id"],
@@ -639,7 +646,7 @@ def test_design_tasks_are_isolated_and_old_design_cannot_survive_reapproval(repo
     assert rejected.returncode == 1 and "requires a Requirements change" in rejected.stderr
     original = second_doc.read_bytes()
     worktrees = git(source, "worktree", "list", "--porcelain")
-    reopened = workflow_report(dev_workflow, source, "revise-requirements", second_id)
+    reopened = workflow_report(dev_workflow, source, "revise-requirements", second_id, *stage_args(waiting))
     assert (reopened["current_stage"], reopened["status"]) == ("requirements", "running")
     assert reopened["requirements_snapshot"] is None and Path(second["requirements_snapshot"]).exists()
     updated = approve_requirements(dev_workflow, source, reopened)
@@ -677,7 +684,7 @@ def test_old_design_session_cannot_submit_after_revision_or_replay_same_digest(r
     task = approve_requirements(dev_workflow, source, workflow_report(dev_workflow, source, "start", "old-session"))
     task_id = task["task_id"]
     design_session = workflow_report(dev_workflow, source, "design-input", task_id)
-    revised = workflow_report(dev_workflow, source, "revise-requirements", task_id)
+    revised = workflow_report(dev_workflow, source, "revise-requirements", task_id, *stage_args(design_session))
     requirements_path, design_path = Path(task["requirements_path"]), Path(task["design_path"])
     design_path.write_text(design_draft(design_session), encoding="utf-8")
     docs = (requirements_path.read_bytes(), design_path.read_bytes())

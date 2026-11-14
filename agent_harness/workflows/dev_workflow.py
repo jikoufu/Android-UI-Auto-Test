@@ -1,4 +1,4 @@
-"""Orchestrate Git Workspace, Requirements and Design."""
+"""Orchestrate the manually triggered development workflow."""
 
 from __future__ import annotations
 
@@ -22,15 +22,15 @@ if __package__:
     from .approved_artifacts import publish_snapshot, read_snapshot, snapshot_path
     from .design_document import review_design
     from .requirements_document import RequirementsError, artifact_path, document_path, review_requirements, verify_worktree
-    from .requirements_document import GitReadError, checked_artifact, requirements_trace
-    from .test_design_document import Plan, bundle_archive, bundle_digest, execution_inputs, file_hashes, parse_plan, relative_input, test_inputs
+    from .requirements_document import GitReadError, checked_artifact, markdown_sections, requirements_trace
+    from .test_design_document import PYTEST_CONFIG, TEST_ROOTS, Plan, bundle_archive, bundle_digest, execution_inputs, file_hashes, parse_plan, relative_input, test_inputs
     from .pytest_evidence import EVIDENCE_POLICY, run_cases
 else:
     from approved_artifacts import publish_snapshot, read_snapshot, snapshot_path
     from design_document import review_design
     from requirements_document import RequirementsError, artifact_path, document_path, review_requirements, verify_worktree
-    from requirements_document import GitReadError, checked_artifact, requirements_trace
-    from test_design_document import Plan, bundle_archive, bundle_digest, execution_inputs, file_hashes, parse_plan, relative_input, test_inputs
+    from requirements_document import GitReadError, checked_artifact, markdown_sections, requirements_trace
+    from test_design_document import PYTEST_CONFIG, TEST_ROOTS, Plan, bundle_archive, bundle_digest, execution_inputs, file_hashes, parse_plan, relative_input, test_inputs
     from pytest_evidence import EVIDENCE_POLICY, run_cases
 
 
@@ -41,7 +41,8 @@ STAGES = (
     "git_workspace", "requirements", "design", "test_design", "development", "acceptance",
     "integration_cleanup",
 )
-ACTIVE_STAGES = ("requirements", "design", "test_design")
+ACTIVE_STAGES = ("requirements", "design", "test_design", "development")
+POST_TEST_DESIGN = ("development", "acceptance")
 DRAFT_STATUSES = ("not_implemented", "running", "waiting_for_input", "waiting_for_approval", "failed")
 
 
@@ -71,6 +72,10 @@ class Task:
     test_design_approval_id: str | None = None
     test_design_archive_sha256: str | None = None
     test_evidence: dict | None = None
+    development_sha256: str | None = None
+    development_approval_id: str | None = None
+    development_archive_sha256: str | None = None
+    development_evidence: dict | None = None
 
     def requirements_path(self) -> Path:
         assert self.worktree_path is not None
@@ -92,10 +97,12 @@ class Task:
         stages["git_workspace"] = "completed" if workspace_ready else self.status
         if workspace_ready:
             stages["requirements"] = "completed" if self.requirements_completed else self.status
-        if self.current_stage in ("design", "test_design", "development"):
+        if self.current_stage in ("design", "test_design", *POST_TEST_DESIGN):
             stages["design"] = self.status if self.current_stage == "design" else "completed"
-        if self.current_stage in ("test_design", "development"):
+        if self.current_stage in ("test_design", *POST_TEST_DESIGN):
             stages["test_design"] = self.status if self.current_stage == "test_design" else "completed"
+        if self.current_stage in POST_TEST_DESIGN:
+            stages["development"] = self.status if self.current_stage == "development" else "completed"
         requirements_snapshot = self.approved_path("requirements")
         design_snapshot = self.approved_path("design")
         return {
@@ -109,6 +116,9 @@ class Task:
             "test_design_snapshot": str(self.approved_path("test_design")) if self.test_design_approval_id else None,
             "test_design_archive": str(self.test_design_archive()) if self.test_design_approval_id else None,
             "test_design_approval_scope": "verified_archive" if self.test_design_approval_id else None,
+            "development_path": str(self.requirements_path().with_name("development.md")) if self.test_design_approval_id else None,
+            "development_archive": str(self.approved_path("development").with_suffix(".zip")) if self.development_approval_id else None,
+            "development_approval_scope": "verified_archive" if self.development_approval_id else None,
             "next_stage": self.current_stage if workspace_ready and self.status != "failed" else None,
         }
 
@@ -118,7 +128,9 @@ def state_root() -> Path:
     return (PROJECT_ROOT / runtime).resolve() / "state" / "dev-workflow"
 
 
-def save(path: Path, task: Task, *, verify_test_approval: bool = False) -> None:
+def save(
+    path: Path, task: Task, *, verify_test_approval: bool = False, verify_development_approval: bool = False,
+) -> None:
     # Replace a complete record so readers see either the old or the new state.
     stream = NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False)
     temporary = Path(stream.name)
@@ -130,6 +142,8 @@ def save(path: Path, task: Task, *, verify_test_approval: bool = False) -> None:
             os.fsync(stream.fileno())
         if verify_test_approval:
             verify_approved_test_bundle(task, check_live=False)
+        if verify_development_approval:
+            verify_approved_development(task, check_live=False)
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -150,7 +164,12 @@ def validate_workspace(worktree_path: object, branch: object, base_commit: objec
 
 def load(path: Path, task_id: str) -> Task:
     try:
-        task = Task(**json.loads(path.read_text(encoding="utf-8")))
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(record, dict):
+            # Drop the retired handshake fields from existing local task records.
+            record.pop("development_baseline_sha256", None)
+            record.pop("development_handoff_sha256", None)
+        task = Task(**record)
     except FileNotFoundError as exc:
         raise WorkflowError(f"Task not found: {task_id}") from exc
     except (ValueError, TypeError) as exc:
@@ -161,7 +180,8 @@ def load(path: Path, task_id: str) -> Task:
         "requirements": (*DRAFT_STATUSES, "paused"),
         "design": (*DRAFT_STATUSES, "paused"),
         "test_design": (*DRAFT_STATUSES, "paused"),
-        "development": ("not_implemented",),
+        "development": (*DRAFT_STATUSES, "paused"),
+        "acceptance": ("not_implemented",),
     }
     invalid = f"Invalid task record: {path}"
     if (
@@ -182,7 +202,7 @@ def load(path: Path, task_id: str) -> Task:
         task.status != "paused" or task.paused_from not in DRAFT_STATUSES
     ):
         raise WorkflowError(invalid)
-    if task.requirements_completed is not (task.current_stage in ("design", "test_design", "development")):
+    if task.requirements_completed is not (task.current_stage in ("design", "test_design", *POST_TEST_DESIGN)):
         raise WorkflowError(invalid)
     if not isinstance(task.requirements_revision_required, bool) or (
         task.requirements_revision_required and (
@@ -195,8 +215,9 @@ def load(path: Path, task_id: str) -> Task:
         raise WorkflowError(invalid)
     for stage, completed, digest, approval_id in (
         ("requirements", task.requirements_completed, task.requirements_sha256, task.requirements_approval_id),
-        ("design", task.current_stage in ("test_design", "development"), task.design_sha256, task.design_approval_id),
-        ("test_design", task.current_stage == "development", task.test_design_sha256, task.test_design_approval_id),
+        ("design", task.current_stage in ("test_design", *POST_TEST_DESIGN), task.design_sha256, task.design_approval_id),
+        ("test_design", task.current_stage in POST_TEST_DESIGN, task.test_design_sha256, task.test_design_approval_id),
+        ("development", task.current_stage == "acceptance", task.development_sha256, task.development_approval_id),
     ):
         has_digest = completed or (
             task.current_stage == stage and "waiting_for_approval" in (task.status, task.paused_from)
@@ -210,17 +231,28 @@ def load(path: Path, task_id: str) -> Task:
             not completed or not isinstance(approval_id, str) or not re.fullmatch(r"[0-9a-f]{32}", approval_id)
         ):
             raise WorkflowError(invalid)
-    if task.current_stage in ("test_design", "development") and task.design_approval_id is None:
+    if task.current_stage in ("test_design", *POST_TEST_DESIGN) and task.design_approval_id is None:
         raise WorkflowError(invalid)
-    if task.current_stage == "development" and task.test_design_approval_id is None:
+    if task.current_stage in POST_TEST_DESIGN and task.test_design_approval_id is None:
         raise WorkflowError(invalid)
     if task.test_design_archive_sha256 is not None and (
-        task.current_stage != "development" or not isinstance(task.test_design_archive_sha256, str)
+        task.current_stage not in POST_TEST_DESIGN or not isinstance(task.test_design_archive_sha256, str)
         or not re.fullmatch(r"[0-9a-f]{64}", task.test_design_archive_sha256)
     ):
         raise WorkflowError(invalid)
     if task.test_evidence is not None and (
-        task.current_stage not in ("test_design", "development") or not isinstance(task.test_evidence, dict)
+        task.current_stage not in ("test_design", *POST_TEST_DESIGN) or not isinstance(task.test_evidence, dict)
+    ):
+        raise WorkflowError(invalid)
+    if task.current_stage == "acceptance" and not task.development_approval_id:
+        raise WorkflowError(invalid)
+    if task.development_archive_sha256 is not None and (
+        task.current_stage != "acceptance" or not isinstance(task.development_archive_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", task.development_archive_sha256)
+    ):
+        raise WorkflowError(invalid)
+    if task.development_evidence is not None and (
+        task.current_stage not in POST_TEST_DESIGN or not isinstance(task.development_evidence, dict)
     ):
         raise WorkflowError(invalid)
     return task
@@ -291,7 +323,7 @@ def task_document(task: Task, *, prepare: bool = False) -> Path:
     assert task.worktree_path is not None and task.branch is not None
     worktree = Path(task.worktree_path)
     verify_worktree(PROJECT_ROOT, worktree, task.branch)
-    filename = "test-plan.md" if task.current_stage in ("test_design", "development") else f"{task.current_stage}.md"
+    filename = "test-plan.md" if task.current_stage in ("test_design", *POST_TEST_DESIGN) else f"{task.current_stage}.md"
     return document_path(worktree, task.task_id, prepare=prepare, filename=filename)
 
 
@@ -340,7 +372,7 @@ def test_bundle(task: Task, data: bytes) -> tuple[str | None, dict[str, bytes], 
     automated = {key: case for key, case in plan.cases.items() if case.mode in ("red", "pass")}
     evidence = task.test_evidence
     if automated:
-        inputs = execution_inputs(Path(task.worktree_path), inputs)
+        inputs = capture_task_inputs(task, inputs)
         files = file_hashes(inputs)
         if (not evidence or evidence.get("policy") != EVIDENCE_POLICY
                 or evidence.get("fingerprint") != bundle_digest(data, files, None)):
@@ -352,6 +384,10 @@ def test_bundle(task: Task, data: bytes) -> tuple[str | None, dict[str, bytes], 
     return bundle_digest(data, file_hashes(inputs), evidence), inputs, evidence
 
 
+def capture_task_inputs(task: Task, inputs: dict[str, bytes]) -> dict[str, bytes]:
+    return execution_inputs(Path(task.worktree_path), inputs, task_docs=f"docs/changes/{task.task_id}/")
+
+
 def prepare_stage(task: Task) -> Task:
     assert task.worktree_path is not None
     changes = {f"{task.current_stage}_sha256": None}
@@ -361,7 +397,11 @@ def prepare_stage(task: Task) -> Task:
             approved_requirements(task, Path(task.worktree_path))
         elif task.current_stage == "test_design":
             approved_test_inputs(task, Path(task.worktree_path))
+        elif task.current_stage == "development":
+            development_inputs(task)
     except (OSError, RequirementsError, WorkflowError) as exc:
+        if (task.current_stage, task.status) == ("development", "not_implemented"):
+            raise
         return replace(task, status="failed", error=str(exc), paused_from=None, **changes)
     return replace(task, status="running", error=None, paused_from=None, **changes)
 
@@ -413,12 +453,37 @@ def retired_approvals(task: Task) -> list[dict[str, str]]:
 
 def transition(task: Task, operation: str, approval: str | None, input_received: bool) -> Task:
     stage = task.current_stage
+    if operation == "revise-development" and (stage, task.status) == ("acceptance", "not_implemented"):
+        worktree = Path(task.worktree_path)
+        verify_worktree(PROJECT_ROOT, worktree, task.branch)
+        retired = {
+            "stage": "development", "approval_id": task.development_approval_id, "sha256": task.development_sha256,
+            "test_design_sha256": task.test_design_sha256,
+        }
+        if task.development_archive_sha256 is not None:
+            retired["archive_sha256"] = task.development_archive_sha256
+        return prepare_stage(replace(
+            task, current_stage="development", status="running",
+            approval_history=[*task.approval_history, retired],
+            development_sha256=None, development_approval_id=None, development_archive_sha256=None,
+            development_evidence=None,
+        ))
     if operation == "revise-requirements" and stage in ("design", "test_design", "development"):
         return prepare_stage(replace(
             task, current_stage="requirements", requirements_completed=False, requirements_approval_id=None,
             requirements_revision_required=False, design_sha256=None, design_approval_id=None,
             approval_history=retired_approvals(task),
             test_design_sha256=None, test_design_approval_id=None, test_design_archive_sha256=None, test_evidence=None,
+            development_sha256=None, development_evidence=None,
+        ))
+    if operation in ("revise-design", "revise-tests") and stage == "development":
+        retired = retired_approvals(task)
+        target = "design" if operation == "revise-design" else "test_design"
+        return prepare_stage(replace(
+            task, current_stage=target, approval_history=[*task.approval_history, *retired[-(2 if target == "design" else 1):]],
+            design_approval_id=None if target == "design" else task.design_approval_id,
+            test_design_sha256=None, test_design_approval_id=None, test_design_archive_sha256=None, test_evidence=None,
+            development_sha256=None, development_evidence=None,
         ))
     if stage not in ACTIVE_STAGES:
         raise WorkflowError(f"Cannot {operation} during {task.current_stage}/{task.status}.")
@@ -438,6 +503,8 @@ def transition(task: Task, operation: str, approval: str | None, input_received:
         if task.status == "waiting_for_input" and not input_received:
             raise WorkflowError(f"Continue after the user answers the open {stage} questions (--with-input).")
         return prepare_stage(task)
+    if stage == "development":
+        return development_transition(task, operation, approval)
 
     if operation not in ("submit", "approve"):
         raise WorkflowError(f"Cannot {operation} during {stage}/{task.status}.")
@@ -532,20 +599,11 @@ def run_test_design(task: Task) -> Task:
     if plan.waiting or not any(case.mode in ("red", "pass") for case in plan.cases.values()):
         raise WorkflowError("test-run needs a complete plan with automated pytest cases.")
     worktree = Path(task.worktree_path)
-    inputs = execution_inputs(worktree, test_inputs(worktree, task.base_commit, plan))
+    inputs = capture_task_inputs(task, test_inputs(worktree, task.base_commit, plan))
     files = file_hashes(inputs)
-    with TemporaryDirectory(prefix="td-run-") as directory:
-        copy = Path(directory)
-        for name, contents in inputs.items():
-            destination = copy / name
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            with destination.open("xb") as stream:
-                stream.write(contents)
-        evidence = run_cases(copy, plan.cases)
-        if any(checked_artifact(copy, copy / name).read_bytes() != contents for name, contents in inputs.items()):
-            raise WorkflowError("Captured inputs changed inside the pytest run; no evidence recorded.")
+    evidence = run_captured_cases(inputs, plan.cases)
     if data != path.read_bytes() or files != file_hashes(
-        execution_inputs(worktree, test_inputs(worktree, task.base_commit, plan))
+        capture_task_inputs(task, test_inputs(worktree, task.base_commit, plan))
     ):
         raise WorkflowError("Test plan or files changed during pytest; run again.")
     return replace(task, test_evidence={
@@ -554,7 +612,23 @@ def run_test_design(task: Task) -> Task:
     })
 
 
-def verify_approved_test_bundle(task: Task, *, check_live: bool = True) -> dict[str, bytes]:
+def run_captured_cases(inputs: dict[str, bytes], cases: dict) -> dict:
+    with TemporaryDirectory(prefix="td-run-") as directory:
+        copy = Path(directory)
+        for name, contents in inputs.items():
+            destination = copy / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with destination.open("xb") as stream:
+                stream.write(contents)
+        evidence = run_cases(copy, cases)
+        if any(checked_artifact(copy, copy / name).read_bytes() != contents for name, contents in inputs.items()):
+            raise WorkflowError("Captured inputs changed inside the pytest run; no evidence recorded.")
+    return evidence
+
+
+def verified_test_bundle(
+    task: Task, *, check_live: bool, allow_historical_policy: bool = False,
+) -> tuple[bytes, Plan, dict[str, bytes], dict | None]:
     """Validate and return the approved bytes, never mutable working-copy inputs.
 
     Approval commits an archive, not a promise that an editor cannot change the
@@ -568,39 +642,207 @@ def verify_approved_test_bundle(task: Task, *, check_live: bool = True) -> dict[
     archive = task.test_design_archive()
     if snapshot is None or archive is None or task.test_design_archive_sha256 is None:
         raise WorkflowError("No verified Test Design archive. Submit for approval again.")
-    contents = read_snapshot(worktree, archive, task.test_design_archive_sha256)
-    try:
-        with ZipFile(BytesIO(contents)) as bundle:
-            names = bundle.namelist()
-            if len(names) != len(set(names)) or not {"test-plan.md", "evidence.json"}.issubset(names):
-                raise ValueError("Duplicate or missing archive entries")
-            for name in names:
-                if name not in ("test-plan.md", "evidence.json") and (
-                    not name.startswith("files/") or not relative_input(name[6:])
-                ):
-                    raise ValueError("Invalid archive input path")
-            data = bundle.read("test-plan.md")
-            evidence = json.loads(bundle.read("evidence.json"))
-            inputs = {name[6:]: bundle.read(name) for name in names if name.startswith("files/")}
-    except (BadZipFile, ValueError, KeyError, RuntimeError) as exc:
-        raise WorkflowError(f"Invalid Test Design archive: {exc}") from exc
+    data, inputs, evidence = read_bundle(worktree, archive, task.test_design_archive_sha256, "test-plan.md")
     if data != read_snapshot(worktree, snapshot, sha256(data).hexdigest()):
         raise WorkflowError("Approved test plan does not match the archive.")
     plan = inspect_test_plan(task, data)
     if plan.waiting or bundle_digest(data, file_hashes(inputs), evidence) != task.test_design_sha256:
         raise WorkflowError("Approved archive does not match the submitted bundle.")
     if any(case.mode in ("red", "pass") for case in plan.cases.values()) and (
-        not isinstance(evidence, dict) or evidence.get("policy") != EVIDENCE_POLICY
+        not isinstance(evidence, dict)
+        or (evidence.get("policy") != EVIDENCE_POLICY and not allow_historical_policy)
     ):
         raise WorkflowError("Approved evidence uses an obsolete execution policy. Run and approve again.")
     if check_live:
         if task_document(task).read_bytes() != data or test_bundle(task, data)[0] != task.test_design_sha256:
             raise WorkflowError("Approved test artifacts no longer match the bundle.")
-    return inputs
+    return data, plan, inputs, evidence
+
+
+def read_bundle(
+    worktree: Path, archive: Path, digest: str, document: str,
+) -> tuple[bytes, dict[str, bytes], dict | None]:
+    contents = read_snapshot(worktree, archive, digest)
+    try:
+        with ZipFile(BytesIO(contents)) as bundle:
+            names = bundle.namelist()
+            if len(names) != len(set(names)) or not {document, "evidence.json"}.issubset(names):
+                raise ValueError("Duplicate or missing archive entries")
+            for name in names:
+                if name not in (document, "evidence.json") and (
+                    not name.startswith("files/") or not relative_input(name[6:])
+                ):
+                    raise ValueError("Invalid archive input path")
+            data = bundle.read(document)
+            evidence = json.loads(bundle.read("evidence.json"))
+            if evidence is not None and not isinstance(evidence, dict):
+                raise ValueError("Invalid archive evidence")
+            inputs = {name[6:]: bundle.read(name) for name in names if name.startswith("files/")}
+    except (BadZipFile, ValueError, KeyError, RuntimeError) as exc:
+        stage = "Test Design" if document == "test-plan.md" else "Development"
+        raise WorkflowError(f"Invalid {stage} archive: {exc}") from exc
+    return data, inputs, evidence
+
+
+def verify_approved_test_bundle(task: Task, *, check_live: bool = True) -> dict[str, bytes]:
+    return verified_test_bundle(task, check_live=check_live)[2]
+
+
+def development_inputs(
+    task: Task, *, allow_historical_policy: bool = False,
+) -> tuple[bytes, Plan, dict[str, bytes], dict | None]:
+    worktree = Path(task.worktree_path)
+    plan_data, plan, approved, evidence = verified_test_bundle(
+        task, check_live=False, allow_historical_policy=allow_historical_policy,
+    )
+    if task_document(task).read_bytes() != plan_data:
+        raise WorkflowError("Test plan changed. Use revise-tests and reapprove.")
+    for stage, filename in (("requirements", "requirements.md"), ("design", "design.md")):
+        expected = read_snapshot(worktree, task.approved_path(stage), getattr(task, f"{stage}_sha256"))
+        if document_path(worktree, task.task_id, prepare=False, filename=filename).read_bytes() != expected:
+            raise WorkflowError(f"{stage.capitalize()} draft differs from approval. Use revise-{stage} and reapprove.")
+    def protected(name: str) -> bool:
+        parts = name.casefold().split("/")
+        return (
+            name in plan.inputs or parts[0] in (*TEST_ROOTS, "data")
+            or parts[-1] in PYTEST_CONFIG
+        )
+
+    live = test_inputs(worktree, task.base_commit, plan)
+    captured = capture_task_inputs(task, live)
+    automated = {key: case for key, case in plan.cases.items() if case.mode in ("red", "pass")}
+    protected_live = captured if automated else live
+    if {name: data for name, data in protected_live.items() if protected(name)} != {
+        name: data for name, data in approved.items() if protected(name)
+    }:
+        raise WorkflowError("Approved test files, fixtures or configuration changed. Use revise-tests and reapprove.")
+    if automated and (
+        not evidence or evidence.get("fingerprint") != bundle_digest(plan_data, file_hashes(approved), None)
+        or any(
+            evidence.get("outcomes", {}).get(key, {}).get("status") != ("red" if case.mode == "red" else "passed")
+            or evidence["outcomes"][key].get("node") != case.target
+            for key, case in automated.items()
+        )
+    ):
+        raise WorkflowError("Missing or invalid approved Red/Pass evidence. Use revise-tests and reapprove.")
+    return plan_data, plan, captured, evidence
+
+
+def development_input(root: Path, task_id: str) -> dict[str, object]:
+    path = task_state_path(root, task_id)
+    with task_lock(path):
+        task = load(path, task_id)
+        if (task.current_stage, task.status) != ("development", "running"):
+            raise WorkflowError("Development input is available only during development/running.")
+        plan_data, _, _, evidence = development_inputs(task)
+        requirements, design = approved_test_inputs(task, Path(task.worktree_path))
+        return {
+            **task.report(),
+            "approved_requirements": requirements.decode("utf-8"),
+            "approved_design": design.decode("utf-8"), "approved_test_plan": plan_data.decode("utf-8"),
+            "approved_test_evidence": evidence,
+            "approved_test_evidence_scope": "test_design_archive",
+        }
+
+
+def run_development(task: Task) -> Task:
+    if (task.current_stage, task.status) != ("development", "running"):
+        raise WorkflowError("Development test-run requires development/running.")
+    plan_data, plan, captured, _ = development_inputs(task)
+    cases = {key: replace(case, mode="pass") for key, case in plan.cases.items() if case.mode in ("red", "pass")}
+    if not cases:
+        raise WorkflowError("No automated nodes in the approved plan. Document the approved alternative.")
+    try:
+        result = run_captured_cases(captured, cases)
+    except (RequirementsError, OSError) as exc:
+        return replace(task, status="failed", development_evidence=None, error=str(exc))
+    live_plan, _, live_files, _ = development_inputs(task)
+    if (plan_data, captured) != (live_plan, live_files):
+        raise WorkflowError("Development files changed while pytest ran. Run again.")
+    evidence = {**result, "scope": "implementation_snapshot",
+                "fingerprint": bundle_digest(plan_data, file_hashes(captured), None)}
+    passed = result["exit_code"] == 0 and all(outcome["status"] == "passed" for outcome in result["outcomes"].values())
+    return replace(task, development_evidence=evidence, status="running" if passed else "failed",
+                   error=None if passed else "Development tests failed. Inspect development_evidence and continue.")
+
+
+def development_transition(task: Task, operation: str, approval: str | None) -> Task:
+    if operation in ("block", "fail") and task.status == "running":
+        return replace(task, status="waiting_for_input" if operation == "block" else "failed", error=approval)
+    if (operation, task.status) not in (("submit", "running"), ("approve", "waiting_for_approval")):
+        raise WorkflowError(f"Cannot {operation} during development/{task.status}.")
+    data, plan, captured, _ = development_inputs(task)
+    worktree = Path(task.worktree_path)
+    record = document_path(worktree, task.task_id, prepare=False, filename="development.md").read_bytes()
+    try:
+        summary = record.decode("utf-8-sig")
+    except UnicodeError as exc:
+        raise WorkflowError("Development record must be UTF-8 Markdown.") from exc
+    cases = {key: case for key, case in plan.cases.items() if case.mode in ("red", "pass")}
+    evidence = task.development_evidence
+    hashes = file_hashes(captured)
+    if cases and (
+        not evidence or evidence.get("fingerprint") != bundle_digest(data, hashes, None)
+        or evidence.get("exit_code") != 0
+        or any(evidence.get("outcomes", {}).get(key, {}).get("status") != "passed" for key in cases)
+    ):
+        raise WorkflowError("Run test-run and pass all approved automated cases on the current implementation.")
+    sections = markdown_sections(summary, record_sections=("Trace",))
+    if not sections.get("Summary", "").strip() or not sections.get("Verification", "").strip():
+        raise WorkflowError("Development record requires Summary and Verification sections.")
+    rows = set()
+    for line in sections.get("Trace", "").splitlines():
+        if not line.strip():
+            continue
+        row = re.fullmatch(r"- (FR-[0-9]{3}) / (AC-[0-9]{3}): \S.*", line.rstrip())
+        if row is None or row.groups() in rows:
+            raise WorkflowError("Use unique '- FR-001 / AC-001: implementation and verification' trace rows.")
+        rows.add(row.groups())
+    if rows != {(fr, ac) for fr, ac, _ in plan.trace}:
+        raise WorkflowError("Development trace must cover all and only the approved FR/AC pairs.")
+    evidence = {"test_design_sha256": task.test_design_sha256, "green": evidence}
+    digest = bundle_digest(record, hashes, evidence)
+    if operation == "submit":
+        return replace(task, status="waiting_for_approval", development_sha256=digest)
+    if digest != task.development_sha256 or approval != digest:
+        raise WorkflowError("Development changed or the approval SHA-256 does not match. Submit again.")
+    approval_id = uuid4().hex
+    archive = bundle_archive(record, captured, evidence, document="development.md")
+    path = snapshot_path(worktree, task.task_id, "development", approval_id).with_suffix(".zip")
+    publish_snapshot(worktree, path, archive)
+    return replace(
+        task, current_stage="acceptance", status="not_implemented", development_approval_id=approval_id,
+        development_archive_sha256=sha256(archive).hexdigest(),
+    )
+
+
+def verify_approved_development(
+    task: Task, *, check_live: bool = True, allow_historical_policy: bool = False,
+) -> dict[str, bytes]:
+    """Return archive bytes only, even when the live worktree is also checked."""
+    snapshot = task.approved_path("development")
+    if snapshot is None or task.development_archive_sha256 is None:
+        raise WorkflowError("No verifiable Development approval archive.")
+    worktree = Path(task.worktree_path)
+    verify_worktree(PROJECT_ROOT, worktree, task.branch)
+    record, files, evidence = read_bundle(
+        worktree, snapshot.with_suffix(".zip"), task.development_archive_sha256, "development.md",
+    )
+    if (
+        evidence != {"test_design_sha256": task.test_design_sha256, "green": task.development_evidence}
+        or bundle_digest(record, file_hashes(files), evidence) != task.development_sha256
+    ):
+        raise WorkflowError("Development archive does not match the approved digest.")
+    if check_live:
+        _, _, captured, _ = development_inputs(task, allow_historical_policy=allow_historical_policy)
+        live_record = document_path(worktree, task.task_id, prepare=False, filename="development.md").read_bytes()
+        if captured != files or live_record != record:
+            raise WorkflowError("Worktree differs from approved Development archive.")
+    return files
 
 
 def check_test_approval(task: Task) -> Task:
-    if task.current_stage != "development":
+    if (task.current_stage, task.status) != ("development", "not_implemented"):
         return task
     try:
         verify_approved_test_bundle(task)
@@ -621,22 +863,20 @@ def task_command(root: Path, operation: str, task_id: str, *, approval: str | No
     path = task_state_path(root, task_id)
     if operation == "status":
         task = load(path, task_id)
-        if task.current_stage != "development":
+        if task.current_stage not in POST_TEST_DESIGN:
             return task
     with task_lock(path):
         task = load(path, task_id)
-        if operation in ("status", "continue"):
-            checked = check_test_approval(task)
-            if checked != task:
-                checked = replace(checked, state_version=task.state_version + 1)
-                save(path, checked)
-                if operation == "status":
-                    return checked
-                task = checked
-            if operation == "status":
-                return task
-        if operation in ("submit", "approve", "test-run") and (
-            task.state_version == 0
+        legacy_revision = (
+            operation == "revise-requirements"
+            and (task.current_stage, task.status) == ("design", "not_implemented")
+            and task.requirements_approval_id is None
+        )
+        if (operation in ("submit", "approve", "test-run", "block", "fail", "revise-requirements", "revise-design",
+                          "revise-tests", "revise-development")
+                or expected_stage is not None or expected_version is not None
+                or (task.current_stage == "development" and operation in ("pause", "resume", "continue"))) and (
+            (task.state_version == 0 and not legacy_revision)
             or (expected_stage, expected_version) != (task.current_stage, task.state_version)
         ):
             raise WorkflowError(
@@ -644,12 +884,36 @@ def task_command(root: Path, operation: str, task_id: str, *, approval: str | No
                 f"current stage {task.current_stage} version {task.state_version}. "
                 "Restart from the appropriate workflow step instead of replaying this command."
             )
-        updated = run_test_design(task) if operation == "test-run" else transition(task, operation, approval, input_received)
+        if operation in ("status", "continue"):
+            checked = check_test_approval(task)
+            if checked != task:
+                checked = replace(checked, state_version=task.state_version + 1)
+                save(path, checked)
+                return checked
+            if operation == "status":
+                if task.current_stage == "acceptance":
+                    try:
+                        verify_approved_development(task, allow_historical_policy=True)
+                    except (WorkflowError, RequirementsError) as exc:
+                        if isinstance(exc, GitReadError):
+                            raise
+                        raise WorkflowError(
+                            f"{exc} Restore the approved version or request a new review with "
+                            f"revise-development {task_id} --stage acceptance --version {task.state_version}."
+                        ) from exc
+                return task
+        if operation == "test-run":
+            updated = run_development(task) if task.current_stage == "development" else run_test_design(task)
+        else:
+            updated = transition(task, operation, approval, input_received)
         if updated != task or (operation in ("continue", "resume") and updated.status == "running"):
             updated = replace(updated, state_version=task.state_version + 1)
-            if operation == "approve" and updated.current_stage == "development":
+            if operation == "approve" and task.current_stage == "test_design":
                 verify_approved_test_bundle(updated)
                 save(path, updated, verify_test_approval=True)
+            elif operation == "approve" and task.current_stage == "development":
+                verify_approved_development(updated, check_live=True)
+                save(path, updated, verify_development_approval=True)
             else:
                 save(path, updated)
         return updated
@@ -659,11 +923,25 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="operation", required=True)
     commands.add_parser("start", help="create a task worktree and record its state").add_argument("task")
-    for operation in ("status", "pause", "resume", "design-input", "test-design-input", "revise-requirements"):
+    for operation in ("status", "design-input", "test-design-input", "development-input"):
         commands.add_parser(operation).add_argument("task_id")
+    reopen = commands.add_parser("revise-development", help="reopen approved Development for fresh verification")
+    reopen.add_argument("task_id")
+    reopen.add_argument("--stage", required=True, choices=("acceptance",))
+    reopen.add_argument("--version", required=True, type=int)
+    for operation in ("pause", "resume", "revise-requirements", "revise-design", "revise-tests", "block", "fail"):
+        command = commands.add_parser(operation)
+        command.add_argument("task_id")
+        version_required = operation not in ("pause", "resume")
+        command.add_argument("--stage", choices=ACTIVE_STAGES, required=version_required)
+        command.add_argument("--version", type=int, required=version_required)
+        if operation in ("block", "fail"):
+            command.add_argument("reason")
     continuation = commands.add_parser("continue", help="continue analysis in the existing task Worktree")
     continuation.add_argument("task_id")
     continuation.add_argument("--with-input", action="store_true", help="the user answered the open questions")
+    continuation.add_argument("--stage", choices=ACTIVE_STAGES)
+    continuation.add_argument("--version", type=int)
     submit = commands.add_parser("submit", help="submit a draft from the specified stage and version")
     approve = commands.add_parser("approve", help="approve the exact submitted stage and version")
     test_run = commands.add_parser("test-run", help="run and record the current Test Design pytest cases")
@@ -682,11 +960,15 @@ def main() -> int:
         if args.operation == "test-design-input":
             print(json.dumps(test_design_input(root, args.task_id), indent=2))
             return 0
+        if args.operation == "development-input":
+            print(json.dumps(development_input(root, args.task_id), indent=2))
+            return 0
         if args.operation == "start":
             task = start(root, args.task)
         else:
             task = task_command(
-                root, args.operation, args.task_id, approval=getattr(args, "sha256", None),
+                root, args.operation, args.task_id,
+                approval=getattr(args, "sha256", getattr(args, "reason", None)),
                 input_received=getattr(args, "with_input", False),
                 expected_stage=getattr(args, "stage", None), expected_version=getattr(args, "version", None),
             )
@@ -694,7 +976,10 @@ def main() -> int:
         print(f"dev-workflow: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(task.report(), indent=2))
-    return int(task.status == "failed" and args.operation in ("start", "continue", "resume", "approve", "revise-requirements"))
+    return int(task.status == "failed" and (
+        args.operation in ("start", "continue", "resume", "approve", "revise-requirements", "revise-development", "fail")
+        or (args.operation == "test-run" and task.current_stage == "development")
+    ))
 
 
 if __name__ == "__main__":

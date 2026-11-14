@@ -30,6 +30,7 @@ REQUIRED = (
 )
 CASE_ID = r"TC-(?!000)[0-9]{3}"
 TEST_ROOTS = ("tests", "unit_tests")
+PYTEST_CONFIG = ("pytest.ini", ".pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg", "conftest.py")
 OFFLINE_TEST_ROOT = ("unit_tests", "test_design")
 
 
@@ -149,7 +150,7 @@ def test_inputs(worktree: Path, base_commit: str, plan: Plan) -> dict[str, bytes
             continue
         files.add(name)
     files.update(
-        name for name in ("pytest.ini", ".pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg", "conftest.py")
+        name for name in PYTEST_CONFIG
         if os.path.lexists(worktree / name)
     )
     return {name: checked_artifact(worktree, worktree / name).read_bytes() for name in sorted(files)}
@@ -159,15 +160,15 @@ def file_hashes(files: dict[str, bytes]) -> dict[str, str]:
     return {name: sha256(data).hexdigest() for name, data in files.items()}
 
 
-def execution_inputs(worktree: Path, inputs: dict[str, bytes]) -> dict[str, bytes]:
-    """Capture tracked project files and the selected test inputs for an isolated pytest run."""
+def execution_inputs(worktree: Path, inputs: dict[str, bytes], *, task_docs: str) -> dict[str, bytes]:
+    """Capture Git-visible project files and declared inputs, excluding generated task records."""
     files = inputs.copy()
-    tracked = read_git(worktree, "ls-files", "-z")
+    tracked = read_git(worktree, "ls-files", "-z", "--others", "--exclude-standard", "--cached")
     for raw in tracked.split(b"\0"):
         if not raw:
             continue
         name = os.fsdecode(raw)
-        if name in files:
+        if name in files or name.startswith(task_docs):
             continue
         if not relative_input(name):
             raise RequirementsError(f"Invalid tracked test execution path: {name}")
@@ -185,10 +186,12 @@ def bundle_digest(plan_data: bytes, files: dict[str, str], evidence: dict | None
     return sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def bundle_archive(plan_data: bytes, files: dict[str, bytes], evidence: dict | None) -> bytes:
+def bundle_archive(
+    plan_data: bytes, files: dict[str, bytes], evidence: dict | None, *, document: str = "test-plan.md",
+) -> bytes:
     output = BytesIO()
     with ZipFile(output, "w", ZIP_DEFLATED) as archive:
-        archive.writestr("test-plan.md", plan_data)
+        archive.writestr(document, plan_data)
         archive.writestr("evidence.json", json.dumps(evidence, sort_keys=True).encode("utf-8"))
         for name, data in files.items():
             archive.writestr(f"files/{name}", data)

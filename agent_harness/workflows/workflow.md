@@ -8,7 +8,7 @@
 | Requirements | `requirements` | 调用共享的 [需求分析 Skill](../skills/requirement_analysis/SKILL.md)，提交草稿并等待用户确认 |
 | Design | `design` | 使用已核验的需求批准快照，调用共享的 [架构设计 Skill](../skills/architecture_design/SKILL.md) 并等待用户确认 |
 | Test Design | `test_design` | 验证两份上游快照，调用共享的 [测试设计 Skill](../skills/test_design/SKILL.md)，运行先行测试并等待人工批准 |
-| Development | `development` | `not_implemented` |
+| Development | `development` | 使用 [共享 Implementation Skill](../skills/implementation/SKILL.md) 实现、复测并等待人工批准 |
 | Acceptance | `acceptance` | `not_implemented` |
 | Integration & Cleanup | `integration_cleanup` | `not_implemented` |
 
@@ -25,7 +25,7 @@ python agent_harness/workflows/dev_workflow.py continue 0123456789abcdef01234567
 python agent_harness/workflows/dev_workflow.py submit 0123456789abcdef0123456789abcdef --stage requirements --version 1
 python agent_harness/workflows/dev_workflow.py approve 0123456789abcdef0123456789abcdef '提交结果中的SHA256' --stage requirements --version 2
 python agent_harness/workflows/dev_workflow.py design-input 0123456789abcdef0123456789abcdef
-python agent_harness/workflows/dev_workflow.py revise-requirements 0123456789abcdef0123456789abcdef
+python agent_harness/workflows/dev_workflow.py revise-requirements 0123456789abcdef0123456789abcdef --stage design --version 3
 ```
 
 ## Requirements 调用与确认
@@ -44,7 +44,7 @@ python agent_harness/workflows/dev_workflow.py revise-requirements 0123456789abc
 - Requirements 的人工 `approve` 成功后，或 Design 的 `continue`、`resume` 返回 `design/running` 后，编排器在同一次已授权的运行中调用 [共享 Design Skill](../skills/architecture_design/SKILL.md)。先执行 `design-input <task_id>`。模型只使用其返回的 `approved_requirements` 作为已批准需求正文。该命令重新核对 Worktree、审批 ID、内容 SHA-256 和需求结构。快照缺失、损坏或哈希不匹配时停止。历史任务只有批准摘要而没有快照时，需要用户手动发起需求变更并重新审批。
 - 在已有 Worktree 内调查，只写 `design_path` 指向的 `design.md`。随后执行 `submit <task_id> --stage design --version <state_version>`，使用本轮 `design-input` 返回的版本。Design 草稿有阻塞问题时进入 `waiting_for_input`，完整草稿进入 `waiting_for_approval`。用户补充技术问题后才用 `continue <task_id> --with-input` 恢复。存在 `RQ` 问题时等待用户发起需求变更，普通继续无法跳过。
 - 在 `waiting_for_approval` 展示设计摘要、关键取舍和风险，然后请用户另行手动调用 `approve <task_id> <design_sha256> --stage design --version <state_version>`，使用提交结果的 SHA-256 和版本。编排器重新验证设计结构、全部 FR 和需求批准版本。批准后保存设计快照并进入 `test_design/running`。
-- 用户要变更已批准需求时，手动调用 `revise-requirements <task_id> <变更说明>`。编排器撤销当前需求与设计的批准引用并回到 `requirements/running`，保留现有 Worktree、草稿和历史快照。重新批准会产生新的需求审批 ID。旧 Design 草稿必须根据新快照更新并重新提交确认，即使两次需求正文的 SHA-256 相同。
+- 用户要变更已批准需求时，手动调用 `revise-requirements <task_id> --stage <current_stage> --version <state_version>` 并说明变更。阶段和版本必须对应用户请求时的状态。编排器撤销当前需求与设计的批准引用并回到 `requirements/running`，保留现有 Worktree、草稿和历史快照。重新批准会产生新的需求审批 ID。旧 Design 草稿必须根据新快照更新并重新提交确认，即使两次需求正文的 SHA-256 相同。
 
 ## Test Design 调用与确认
 
@@ -53,7 +53,7 @@ python agent_harness/workflows/dev_workflow.py revise-requirements 0123456789abc
 - 用最新运行结果的版本执行 `submit <task_id> --stage test_design --version <state_version>`。人工计划可直接提交。自动化计划必须有当前版本的运行证据，且逐项符合计划。向用户展示追踪和实测证据，等待用户手动调用 `approve <task_id> <test_design_sha256> --stage test_design --version <state_version>`。审批摘要绑定计划、测试代码、fixture、配置和实测证据。人工批准后停在 `development/not_implemented`。
 - 自动化 pytest 在临时副本中运行，只收集计划指定的 `unit_tests/test_design/` 节点。运行器跳过仓库 pytest 配置、上级 conftest 和自动加载的插件。依赖来自预先配置的独立虚拟环境。证据绑定捕获的文件和执行策略版本，旧证据需重跑。隐式发现的已删除文件不进入捕获清单，显式引用的测试和输入仍须存在。
 - 批准时将计划、已核对的输入和执行证据保存到只写一次的 ZIP。状态记录包含其 SHA-256。编排器先检查工作副本，再在原子替换状态文件前核验归档结构、成员、摘要及其与审批摘要的关联；失败时保留待审批状态。批准结果的 `test_design_approval_scope: verified_archive` 表示批准归档版本。任务锁不锁定编辑器，工作副本可能在检查后发生变化，这些变更不会获得批准。`status` 或 `continue` 检出变化后撤销过期批准。
-- 后续消费必须在任务锁内重新加载当前状态、检查阶段和版本，并调用 `verify_approved_test_bundle(task)`；该函数默认检查工作副本是否过期，并返回同一次校验的归档输入字节。仅消费返回的字节，不能再读取可变文件替代它们。`check_live=False` 仅供审批发布时验证归档使用。Development 尚未实现，不得直接依据状态字符串启动开发。修改批准的需求仍使用 `revise-requirements`，会使下游批准失效。
+- Test Design 批准后等待用户手动继续。Red 和首次开发预检使用同一文件清单，包含 Git 跟踪文件、未忽略的新文件和显式测试输入，排除生成的任务文档与归档。旧归档如因文件清单变化失配，须重跑并重新审批。开发中继续校验批准文档、测试代码、夹具、配置和显式测试输入，业务源码可按批准设计变更。
 
 自动取证环境由操作者预先准备。设置 `TV_TEST_DESIGN_PYTHON` 为专用虚拟环境解释器的绝对路径。PowerShell 示例使用项目虚拟环境的 pip 向专用环境安装 pytest。
 
@@ -68,7 +68,16 @@ $env:TV_TEST_DESIGN_PYTHON = Join-Path $testDesignEnv 'Scripts/python.exe'
 
 本地模式仅运行已审查的纯逻辑测试及其导入和 fixture。子进程审计钩子用于补充防护，子进程尝试会使证据失效。需要真实设备、服务或外部进程的场景用替身或标记为 environment。执行任意或不可信测试需要操作系统或 CI 隔离。暂时无法读取归档或查询 Git 时，检查命令返回可重试错误并保留批准。
 
-提交和审批在任务锁内核对阶段与版本。拒绝过期命令时保留当前状态和产物。不要替旧会话刷新版本并重试原命令。恢复到待审批状态时，从恢复结果重新展示同一草稿的新批准命令，等待用户确认。旧版无版本记录可查询，继续或恢复编辑后重新提交。
+## Development 调用与确认
+
+- 用户手动调用 `continue <task_id>` 时，用最新任务状态中的版本调用 CLI `continue <task_id> --stage development --version <state_version>`。首次进入时核对批准归档和完整工作副本。返回 `development/running` 后，使用只读的 `development-input <task_id>` 和共享 Implementation Skill，在返回的 Worktree 实现。Red 证据以 Test Design 批准归档为准，由模型核对失败是否对应批准需求。
+- `test-run <task_id> --stage development --version <state_version>` 复用 Test Design 执行器和专用虚拟环境，对当前实现快照中的批准节点要求全部通过。编排器单独记录实现版本的 pytest 结果和指纹。失败状态保留变更与诊断，通过 `continue` 恢复。另用项目现有 pytest 命令运行适用的离线回归，在开发记录写实际结果。人工和环境场景按批准方案记录。
+- 开发操作使用当前版本。暂停、恢复和修订命令也传入 `--stage development --version <state_version>`。需要输入时用 `block <task_id> <reason>` 保存原因，收到补充后用 `continue <task_id> --with-input` 恢复。主动报告失败用 `fail <task_id> <reason>`。用户明确要求重审时，执行 `revise-requirements`、`revise-design` 或 `revise-tests`，保留工作成果并重新审批受影响的阶段。
+- 实现和记录完整后用 `submit <task_id> --stage development --version <state_version>`。提交绑定开发记录、实现内容和当前的 Green 证据。向用户展示摘要、追踪和验证限制，请用户另行手动调用 `approve <task_id> <development_sha256> --stage development --version <state_version>`。批准后停止于 `acceptance/not_implemented`。
+
+- Development 批准把同一份经校验的记录、源码和证据写入只写一次的 ZIP，返回归档路径与 SHA-256。批准范围是归档字节。任务锁无法阻止编辑器改稿，后续 `status` 检查归档和工作副本，差异时返回非零并保留批准记录。历史结果仍可查询，`test_evidence.policy` 保留原策略版本。用户可恢复批准版本，或手动调用诊断中的 `revise-development <task_id> --stage acceptance --version <state_version>`。重开后保留原归档和工作成果，重新测试、提交和人工批准。若原 Test Design 证据不符合当前策略，须先用 `revise-tests` 重新取证和审批。后续消费者应先核验工作副本，再消费同一次校验返回的归档字节。
+
+提交和审批在任务锁内核对阶段与版本。拒绝过期命令时保留当前状态和产物。不要替旧会话刷新版本并重试原命令。恢复到待审批状态时，从恢复结果重新展示同一草稿的新批准命令，等待用户确认。旧版无版本记录可查询，通常可继续或恢复编辑。缺少需求快照且处于 `design/not_implemented` 的旧任务可手动调用 `revise-requirements <task_id> --stage design --version 0`，返回 Requirements 并从版本 1 重新审批。
 
 FR、AC、追踪关系、文档元数据和待确认问题使用各 Skill 指定的格式。审批文档使用 Markdown，原始 HTML 和注释不在支持范围内。结构化章节禁止围栏和缩进代码块，待确认问题仅写 `无` 或完整的问题列表。
 
